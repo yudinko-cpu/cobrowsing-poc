@@ -47,21 +47,25 @@ private struct RecBadge: View {
         Group {
             switch client.state {
             case .streaming(let code):
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                        .opacity(pulse ? 0.3 : 1.0)
-                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
-                                   value: pulse)
+                recCapsule(color: .red, pulse: true) {
                     Text("REC · \(code)")
                         .font(.caption.monospacedDigit().bold())
                         .foregroundStyle(.white)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(.black.opacity(0.75)))
-                .onAppear { pulse = true }
+
+            case .reconnecting(let code):
+                // Жёлтый — сессия жива, но нестабильна. Код всё ещё виден,
+                // потому что реконнект идёт в ту же комнату, оператор не уходит.
+                recCapsule(color: .yellow, pulse: true) {
+                    HStack(spacing: 6) {
+                        Text("↻ \(code)")
+                            .font(.caption.monospacedDigit().bold())
+                        Text("восстанавливаем")
+                            .font(.caption2)
+                            .opacity(0.9)
+                    }
+                    .foregroundStyle(.black)
+                }
 
             case .connecting, .requestingConsent:
                 Text("Подключение…")
@@ -84,6 +88,28 @@ private struct RecBadge: View {
                 EmptyView()
             }
         }
+    }
+
+    /// Общая форма REC-индикатора: пульсирующая цветная точка + произвольный
+    /// контент справа. Используется в двух вариантах — активный стрим (red)
+    /// и реконнект (yellow).
+    @ViewBuilder
+    private func recCapsule<Content: View>(color: Color,
+                                           pulse startPulse: Bool,
+                                           @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+                .opacity(pulse ? 0.3 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
+                           value: pulse)
+            content()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(.black.opacity(0.75)))
+        .onAppear { if startPulse { pulse = true } }
     }
 }
 

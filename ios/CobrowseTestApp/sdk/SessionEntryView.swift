@@ -22,43 +22,60 @@ public struct SessionEntryView: View {
 
             switch client.state {
             case .idle:
-                idleView
+                startView(headline: "Нужна помощь оператора?",
+                          subtitle: "Запустите сессию, и мы соединим вас с поддержкой. Оператор увидит экран этого приложения, чтобы помочь быстрее.",
+                          buttonTitle: "Запустить сессию",
+                          icon: "person.fill.questionmark")
+
             case .requestingConsent, .connecting:
                 ProgressView("Подключаемся…")
                     .progressViewStyle(.circular)
+
             case .streaming(let code):
-                streamingView(code: code)
+                streamingView(code: code, isReconnecting: false)
+
+            case .reconnecting(let code):
+                streamingView(code: code, isReconnecting: true)
+
             case .ended:
-                Text("Сессия завершена")
-                    .font(.headline)
+                startView(headline: "Сессия завершена",
+                          subtitle: "Всё готово. Можете начать новую сессию, если снова понадобится помощь.",
+                          buttonTitle: "Начать новую сессию",
+                          icon: "checkmark.circle")
+
             case .error(let message):
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-                Button("Попробовать снова") {
-                    Task { try? await client.startSession() }
-                }
+                errorView(message: message)
             }
 
             Spacer()
         }
         .padding()
+        // Плавно, чтобы переходы (streaming ⇄ reconnecting, ended → connecting)
+        // не выглядели как резкая мигрень для пользователя.
+        .animation(.easeInOut(duration: 0.2), value: client.state)
     }
 
-    private var idleView: some View {
+    // MARK: - Building blocks
+
+    /// Универсальный "стартовый" вид: используется для .idle и .ended
+    /// (обе ситуации — терминальное состояние с одной большой кнопкой).
+    private func startView(headline: String,
+                           subtitle: String,
+                           buttonTitle: String,
+                           icon: String) -> some View {
         VStack(spacing: 16) {
-            Image(systemName: "person.fill.questionmark")
+            Image(systemName: icon)
                 .font(.system(size: 64))
                 .foregroundStyle(.tint)
-            Text("Нужна помощь оператора?")
+            Text(headline)
                 .font(.title2.bold())
-            Text("Запустите сессию, и мы соединим вас с поддержкой. Оператор увидит экран этого приложения, чтобы помочь быстрее.")
+            Text(subtitle)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Button {
                 Task { try? await client.startSession() }
             } label: {
-                Text("Запустить сессию")
+                Text(buttonTitle)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             }
@@ -67,7 +84,7 @@ public struct SessionEntryView: View {
         }
     }
 
-    private func streamingView(code: String) -> some View {
+    private func streamingView(code: String, isReconnecting: Bool) -> some View {
         VStack(spacing: 32) {
             Text("Сообщите этот код оператору")
                 .font(.headline)
@@ -80,12 +97,24 @@ public struct SessionEntryView: View {
                 .padding(.vertical, 12)
                 .background(Color(.secondarySystemBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 16))
+                // Слегка гасим код во время реконнекта — визуальный сигнал,
+                // что сессия жива, но не полностью стабильна.
+                .opacity(isReconnecting ? 0.5 : 1.0)
 
-            HStack(spacing: 6) {
-                Circle().fill(.green).frame(width: 8, height: 8)
-                Text("Идёт запись экрана")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if isReconnecting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Восстанавливаем связь…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Circle().fill(.green).frame(width: 8, height: 8)
+                    Text("Идёт запись экрана")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Button(role: .destructive) {
@@ -96,6 +125,26 @@ public struct SessionEntryView: View {
                     .padding(.vertical, 8)
             }
             .buttonStyle(.bordered)
+            .controlSize(.large)
+        }
+    }
+
+    private func errorView(message: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(.orange)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.primary)
+            Button {
+                Task { try? await client.startSession() }
+            } label: {
+                Text("Начать заново")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
     }

@@ -64,6 +64,17 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
    через Scheme → Arguments `-CobrowseBackendURL http://<LAN-IP>:4000`, без
    правки кода. Хардкод URL в трёх местах (main + 2 Preview'а) больше не живёт.
 
+10. **iOS state machine — restartable, aware of reconnect.**
+    Состояния: `idle | requestingConsent | connecting | streaming(code) |
+    reconnecting(code) | ended | error(msg)`. Ключевые свойства:
+    * `startSession()` можно звать из любого терминального (`idle/ended/error`)
+      — не нужен рестарт приложения после стопа или сбоя.
+    * Авто-reconnect LiveKit'а мостится в `.reconnecting(code)` — пользователь
+      видит "восстанавливаем связь", а не тишину.
+    * `didDisconnectWithReason` различает пользовательский стоп (`.ended`),
+      сетевую потерю, серверное закрытие, tokenExpired — каждый со своим
+      осмысленным сообщением, а не всё в `.ended`.
+
 ## Структура проекта
 
 ```
@@ -94,7 +105,7 @@ cobrowsing-poc/
 │   └── ExampleApp/                # Тестовое iOS-приложение
 │       ├── CobrowseTestApp.swift  # @main
 │       ├── AppConfig.swift        # backendURL: дефолт + UserDefaults override
-│       ├── ContentView.swift      # TabView + REC-индикатор
+│       ├── ContentView.swift      # TabView + REC-индикатор (streaming/reconnecting)
 │       ├── SessionTab.swift, AnimationTab, FormsTab, CanvasTab, ZooTab
 │       ├── Info.plist.example
 │       └── README.md              # Пошаговый Xcode-setup
