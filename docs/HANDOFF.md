@@ -45,11 +45,19 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
 
 6. **Backend URL split.** `LIVEKIT_URL` — что видят клиенты (iOS/web).
    `LIVEKIT_INTERNAL_URL` — куда сам backend ходит за RoomServiceClient.
-   В проде совпадают, в dev разные (localhost vs host.docker.internal).
+   В проде совпадают (с ws→http сменой схемы), в dev разные (HOST_IP vs
+   host.docker.internal). Оба задаются явно в env — без магического
+   `toHttpScheme` fallback в коде.
 
 7. **CORS через функциональный matcher.** Поддерживает `*`, `dev` (любой localhost),
    список origins через запятую. Прямая передача строки `'dev'` в `cors({origin: ...})`
    приводит к тому, что сервер эхом шлёт `Access-Control-Allow-Origin: dev` — invalid.
+
+8. **Единый источник конфига — `infra/.env.dev`.** HOST_IP, порты, LiveKit-ключи,
+   CORS, log level — всё в одном файле. `docker-compose.dev.yml` — скелет с
+   `${VAR}` интерполяцией, никаких хардкодов IP/портов. `server.js` — все
+   env vars required, fail-fast если что-то не задано. Хочешь поменять порт
+   token-server или host для реального iPhone — правишь одну строку в .env.dev.
 
 ## Структура проекта
 

@@ -11,10 +11,14 @@
 |---|---|---|
 | LiveKit signaling | `ws://127.0.0.1:7880` | iOS SDK, web-agent |
 | LiveKit TCP fallback | `127.0.0.1:7881` | если UDP не проходит |
-| LiveKit WebRTC media | UDP `127.0.0.1:50000-50100` | автоматически через ICE |
+| LiveKit WebRTC media | UDP `127.0.0.1:50000-60000` | автоматически через ICE |
 | Token server | `http://127.0.0.1:4000` | iOS SDK, web-agent |
 | Redis | `127.0.0.1:6379` | только внутренний |
 | Web-agent (Next.js) | `http://127.0.0.1:3000` | оператор в браузере |
+
+Порты и `HOST_IP` для клиентов централизованы в `.env.dev` — правишь одну
+строку, compose и token-server подхватывают. В самом compose-файле только
+`${VAR}` подстановка, никаких хардкодов.
 
 Всё биндится **только на 127.0.0.1** — наружу ничего не торчит.
 
@@ -40,14 +44,23 @@
 cd infra
 cp .env.dev.example .env.dev
 
-# (опционально) сгенерировать свои ключи вместо дефолтных
-# и вписать их в .env.dev + livekit.dev.yaml
+# По умолчанию HOST_IP=127.0.0.1 — работает с Simulator и браузером на этом Mac.
+# Для реального iPhone: в .env.dev поставить HOST_IP=<LAN IP Mac>
+# (узнать: `ipconfig getifaddr en0`).
+# Ключи по умолчанию dev-шные; при смене — синхронизировать с livekit.dev.yaml.
 
-# Первый запуск — обязательно с --build, чтобы собрать образ token-server.
-# .env.dev подхватывается автоматически через env_file: в compose-файле.
-docker compose -f docker-compose.dev.yml up -d --build
+# Первый запуск — с --build, чтобы собрать образы token-server и web-agent.
+# .env.dev подхватывается автоматически (compose ищет .env.dev рядом с yml
+# при --env-file, а env_file: у token-server подгружает те же значения внутрь).
+docker compose -f docker-compose.dev.yml --env-file .env.dev up -d --build
 docker compose -f docker-compose.dev.yml logs -f livekit
 ```
+
+**Важно про `--env-file`**: интерполяция `${VAR}` в compose работает из
+переменных compose-процесса, а не из env_file сервиса. `.env` файл в
+директории со compose подхватывается автоматически (стандартное поведение
+Docker Compose), но для явности мы используем `.env.dev` и передаём его
+через `--env-file .env.dev`. Без этого флага HOST_IP и порты не подставятся.
 
 Ожидаем в логах LiveKit: `starting LiveKit server` + `WebRTC service started`.
 

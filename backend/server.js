@@ -25,22 +25,27 @@ import crypto from 'node:crypto';
 import 'dotenv/config';
 
 // ---- config ----
-const PORT = process.env.PORT || 4000;
-
-// LIVEKIT_URL — URL, который отдаётся клиентам (iOS/web) в ответе.
-// Прод: wss://livekit.example.com. Dev: ws://127.0.0.1:7880.
+//
+// Все переменные — required. Единственный источник истины — .env / compose,
+// никаких fallback'ов в коде: если что-то не задано, сервер падает на старте
+// с понятным сообщением, а не работает с "случайным" дефолтом.
+//
+// Для docker-compose dev-стека — см. infra/.env.dev.example.
+// Для standalone-запуска (node server.js) — см. backend/.env.example.
+const PORT = required('PORT');
+// LIVEKIT_URL — URL, который отдаётся клиентам (iOS/web) в ответе /session/create.
+// Прод: wss://livekit.example.com. Dev: ws://<HOST_IP>:7880.
 const LIVEKIT_URL = required('LIVEKIT_URL');
-
 // LIVEKIT_INTERNAL_URL — куда сам backend ходит за RoomServiceClient
-// (deleteRoom и т.п.). В проде совпадает с LIVEKIT_URL, в dev — другой,
-// потому что backend в контейнере, а клиенты на хосте.
-// Если не задан — используем LIVEKIT_URL с автоматической конвертацией схемы.
-const LIVEKIT_INTERNAL_URL = process.env.LIVEKIT_INTERNAL_URL || toHttpScheme(LIVEKIT_URL);
-
+// (deleteRoom и т.п.). В проде совпадает с LIVEKIT_URL с http-схемой.
+// В dev — http://host.docker.internal:7880 (backend в контейнере,
+// LiveKit на хосте). Всегда задаётся явно — не пытаемся угадать из LIVEKIT_URL.
+const LIVEKIT_INTERNAL_URL = required('LIVEKIT_INTERNAL_URL');
 const API_KEY = required('LIVEKIT_API_KEY');
 const API_SECRET = required('LIVEKIT_API_SECRET');
-const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const REDIS_URL = required('REDIS_URL');
+const CORS_ORIGIN = required('CORS_ORIGIN');
+const LOG_LEVEL = required('LOG_LEVEL');
 
 const CODE_TTL_SECONDS = 10 * 60;       // 10 минут на ввод кода агентом
 const SESSION_TTL_SECONDS = 60 * 60;    // 1 час максимальная длительность
@@ -49,16 +54,6 @@ function required(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
-}
-
-/**
- * Конвертирует WebSocket URL LiveKit в HTTP URL для RoomServiceClient.
- * wss://foo → https://foo
- * ws://foo  → http://foo
- * https://foo и http://foo остаются как есть.
- */
-function toHttpScheme(url) {
-  return url.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
 }
 
 /**
@@ -99,7 +94,7 @@ function buildOriginMatcher(spec) {
 }
 
 // ---- deps ----
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const logger = pino({ level: LOG_LEVEL });
 const redis = new Redis(REDIS_URL);
 const roomService = new RoomServiceClient(LIVEKIT_INTERNAL_URL, API_KEY, API_SECRET);
 
