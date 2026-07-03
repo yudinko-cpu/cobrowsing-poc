@@ -12,8 +12,9 @@ import {
   VideoTrack,
   RoomAudioRenderer,
   useRemoteParticipants,
+  useConnectionState,
 } from '@livekit/components-react';
-import type { RemoteTrackPublication, TrackPublication } from 'livekit-client';
+import type { DisconnectReason, RemoteTrackPublication, TrackPublication } from 'livekit-client';
 import '@livekit/components-styles';
 import { apiFetch } from '../../../lib/api';
 
@@ -103,6 +104,10 @@ export default function SessionPage({ params }: { params: { code: string } }) {
     return <div style={styles.center}>Подключение…</div>;
   }
 
+  // Однократно логируем то, что backend прислал — чтобы можно было увидеть
+  // livekitUrl и roomName в консоли, если участник не подгружается.
+  console.log('[viewer] connecting to LiveKit', { serverUrl, roomName });
+
   return (
     <LiveKitRoom
       token={token}
@@ -112,15 +117,40 @@ export default function SessionPage({ params }: { params: { code: string } }) {
       video={false}   // не публикуем видео с камеры агента
       data-lk-theme="default"
       style={{ height: '100vh' }}
+      onConnected={() => console.log('[viewer] LiveKitRoom onConnected')}
+      onDisconnected={(reason?: DisconnectReason) =>
+        console.warn('[viewer] LiveKitRoom onDisconnected, reason:', reason)
+      }
+      onError={(err: Error) => {
+        console.error('[viewer] LiveKitRoom onError:', err);
+        setError(`LiveKit: ${err.message}`);
+      }}
     >
-      <SessionView code={params.code} onEnd={handleEnd} />
+      <SessionView code={params.code} roomName={roomName} serverUrl={serverUrl} onEnd={handleEnd} />
       <RoomAudioRenderer />
     </LiveKitRoom>
   );
 }
 
-function SessionView({ code, onEnd }: { code: string; onEnd: () => void }) {
+function SessionView({
+  code,
+  roomName,
+  serverUrl,
+  onEnd,
+}: {
+  code: string;
+  roomName?: string;
+  serverUrl?: string;
+  onEnd: () => void;
+}) {
   const remoteParticipants = useRemoteParticipants();
+  const connectionState = useConnectionState();
+
+  // Отдельный лог на смену connection state — легко видно в консоли, где
+  // именно застряли: connecting / connected / reconnecting / disconnected.
+  useEffect(() => {
+    console.log('[viewer] connection state:', connectionState);
+  }, [connectionState]);
 
   // Собираем плоский список ВСЕХ video publications от remote-участников,
   // независимо от source. Причина: iOS SDK версии X может паблишить screen
@@ -177,11 +207,27 @@ function SessionView({ code, onEnd }: { code: string; onEnd: () => void }) {
       </header>
 
       <div style={styles.videoContainer}>
+        {/* Локальный override поверх @livekit/components-styles.
+            Default .lk-participant-media-video ставит object-fit:cover
+            (обрезает по контейнеру). Overrid'ы для source=screen_share есть,
+            но срабатывают, только если у track'а именно этот source; мы же
+            принимаем любой video, поэтому подстраховываемся !important'ом.
+            width/height 100% (а не auto) — важно: с auto video берёт
+            intrinsic-размеры (portrait iPhone screen = высокий), из-за чего
+            родительский flex-контейнер тянется по content'у и вываливается
+            за viewport. С 100% + object-fit:contain video сжимается внутри
+            бокса и правильно letterbox'ится. */}
+        <style>{`
+          .cobrowse-video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: contain !important;
+            background: transparent !important;
+          }
+        `}</style>
+
         {trackRef ? (
-          <VideoTrack
-            trackRef={trackRef}
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-          />
+          <VideoTrack trackRef={trackRef} className="cobrowse-video" />
         ) : (
           <WaitingPlaceholder
             participantCount={remoteParticipants.length}
@@ -191,6 +237,9 @@ function SessionView({ code, onEnd }: { code: string; onEnd: () => void }) {
 
         {/* Debug HUD — виден всегда, потому что POC. */}
         <DebugHUD
+          connectionState={connectionState}
+          roomName={roomName}
+          serverUrl={serverUrl}
           participantCount={remoteParticipants.length}
           videoPublications={videoPublications}
           showingTrack={trackRef !== null}
@@ -230,22 +279,31 @@ function WaitingPlaceholder({
 }
 
 function DebugHUD({
+  connectionState,
+  roomName,
+  serverUrl,
   participantCount,
   videoPublications,
   showingTrack,
 }: {
+  connectionState: string;
+  roomName?: string;
+  serverUrl?: string;
   participantCount: number;
   videoPublications: Array<{ participantIdentity: string; publication: RemoteTrackPublication }>;
   showingTrack: boolean;
 }) {
   const lines = [
+    `LK conn:     ${connectionState}`,
+    `room:        ${roomName ?? '?'}`,
+    `livekit url: ${serverUrl ?? '?'}`,
     `participants: ${participantCount}`,
-    `video pubs: ${videoPublications.length}`,
+    `video pubs:  ${videoPublications.length}`,
     ...videoPublications.map((v) => {
       const p = v.publication;
       return `  · ${v.participantIdentity}: source=${p.source} subscribed=${p.isSubscribed} muted=${p.isMuted}`;
     }),
-    `rendering: ${showingTrack ? 'yes' : 'no'}`,
+    `rendering:   ${showingTrack ? 'yes' : 'no'}`,
   ];
 
   return (
@@ -280,7 +338,12 @@ const styles: Record<string, React.CSSProperties> = {
   header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1f2937' },
   liveBadge: { marginLeft: 12, color: '#f87171', fontSize: 12, fontWeight: 700 },
   endBtn: { background: '#dc2626', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 },
-  videoContainer: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  // minHeight: 0 — обязательно для flex-item в column-родителе. Без него
+  // default min-height: auto = intrinsic content size, и если video внутри
+  // хочет быть высоким (portrait iPhone), контейнер разрастается за пределы
+  // flex-share, выталкивая всё за viewport → появляется скролл. С min-height:0
+  // flex-share (calculated from parent height − siblings) корректно ограничивает.
+  videoContainer: { flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' },
   waiting: { color: '#9ca3af', fontSize: 18, textAlign: 'center', lineHeight: 1.5 },
   debugHud: {
     position: 'absolute',
