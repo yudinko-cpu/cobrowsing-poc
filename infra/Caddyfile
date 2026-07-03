@@ -1,0 +1,42 @@
+# Caddy reverse proxy + auto-TLS.
+# Caddy сам получает Let's Encrypt сертификаты для всех указанных доменов.
+
+# LiveKit WebSocket (signaling)
+{$DOMAIN} {
+    reverse_proxy localhost:7880
+
+    # WebSocket upgrade headers (Caddy делает это автоматически, но явно — надёжнее)
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets localhost:7880
+
+    log {
+        output file /data/livekit-access.log
+        format json
+    }
+}
+
+# Token API
+{$API_DOMAIN} {
+    reverse_proxy localhost:3000
+
+    log {
+        output file /data/api-access.log
+        format json
+    }
+}
+
+# Web agent dashboard (для POC — отдаём готовый build из next export)
+# Для dev — закомментировать, запускать локально через npm run dev
+{$AGENT_DOMAIN} {
+    root * /srv/web-agent
+    file_server
+    try_files {path} /index.html
+
+    log {
+        output file /data/agent-access.log
+        format json
+    }
+}

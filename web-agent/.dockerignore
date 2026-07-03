@@ -1,0 +1,15 @@
+# Всё, что не нужно тащить в docker build context.
+# Особенно важно исключить node_modules и .next — они всё равно
+# перекрываются anonymous volumes в docker-compose.dev.yml,
+# но без этого файла COPY . . залил бы гигабайты в image layer.
+node_modules
+.next
+.env
+.env.*
+!.env.local.example
+npm-debug.log*
+.git
+.gitignore
+Dockerfile*
+.dockerignore
+README.md

@@ -1,0 +1,131 @@
+# Local dev stack — без Caddy, без TLS, всё на localhost.
+#
+# Отладка связки iOS Simulator ↔ backend ↔ LiveKit без публичного сервера.
+# Продовская связка в docker-compose.yml с реальными доменами и Let's Encrypt.
+#
+# Запуск (env-переменные подхватываются из .env.dev автоматически через
+# env_file: у token-server):
+#   cd infra
+#   cp .env.dev.example .env.dev
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Остановка:
+#   docker compose -f docker-compose.dev.yml down
+
+services:
+
+  # LiveKit SFU в dev-режиме.
+  #
+  # network_mode: host — критично для WebRTC на Docker Desktop for Mac.
+  # Без host mode UDP-порты проходят через Docker Desktop network proxy,
+  # где WebRTC-трафик теряется. С host mode LiveKit слушает напрямую
+  # на интерфейсах хоста. Требует Docker Desktop 4.29+ с включённым
+  # "Enable host networking" в Settings → Resources → Network.
+  # На Linux host networking работает всегда без opt-in.
+  #
+  # --node-ip НЕ указываем: в host mode LiveKit сам определяет свои
+  # интерфейсы и отдаёт все IPv4-кандидаты. Это нужно, потому что iOS
+  # Simulator (libwebrtc) НЕ отдаёт loopback как ICE-кандидат — он оффрит
+  # только "внешние" интерфейсы (LAN, VPN, virtual). ICE должно найти
+  # пересечение: LiveKit и Simulator видят один и тот же интерфейс хоста.
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    # ports: игнорируются при network_mode: host — LiveKit слушает напрямую
+    # на портах хоста (7880, 7881, 50000-60000/udp) согласно livekit.dev.yaml.
+    volumes:
+      - ./livekit.dev.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  # Redis — session state для LiveKit + code→room mapping для token-server.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-dev-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+  # Token server. Тот же образ, что в проде, но с dev-настройками.
+  # Порт на хосте: 4000 (не 3000, чтобы не конфликтовать с Next.js dev-сервером).
+  # Внутри контейнера сервис по-прежнему слушает 3000 (см. backend/server.js).
+  #
+  # Hot reload: bind-mount исходников + node --watch. Правки в server.js
+  # применяются автоматически, docker compose build нужен только при
+  # изменении package.json.
+  token-server:
+    build: ../backend
+    restart: unless-stopped
+    network_mode: host
+    command: ["node", "--watch", "server.js"]
+    # env_file подхватывается автоматически (без --env-file флага).
+    # Внутри контейнера LIVEKIT_API_KEY/SECRET окажутся из .env.dev.
+    env_file:
+      - .env.dev
+    volumes:
+      # Монтируем исходники в контейнер
+      - ../backend:/app
+      # Анонимный volume поверх /app/node_modules — иначе mount выше
+      # затрёт node_modules из образа
+      - /app/node_modules
+    environment:
+      # LIVEKIT_URL — то, что backend отдаёт iOS/браузеру в ответе.
+      # iOS Simulator шарит host localhost, поэтому 127.0.0.1 работает.
+      LIVEKIT_URL: ws://192.168.10.10:7880
+      # LIVEKIT_INTERNAL_URL — куда backend сам ходит за RoomServiceClient.
+      # Из контейнера LiveKit доступен как host.docker.internal.
+      LIVEKIT_INTERNAL_URL: http://host.docker.internal:7880
+      REDIS_URL: redis://host.docker.internal:6379
+      # CORS: 'dev' = разрешить любой http://localhost:* и http://127.0.0.1:*
+      # (Next.js часто мигрирует по портам — 3000 → 3001 → 3002).
+      # Для прода — указать конкретные origins через запятую.
+      CORS_ORIGIN: dev
+      LOG_LEVEL: debug
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+      - livekit
+
+  # Next.js web-agent — dashboard оператора.
+  #
+  # Не host mode: web-agent'у не нужны host-интерфейсы, обычного port mapping
+  # хватает. Браузер ходит на 127.0.0.1:3000, оттуда идут запросы на 127.0.0.1:4000
+  # (token-server), это всё уровень браузера — контейнеру знать про host-сеть не надо.
+  #
+  # Hot reload: bind-mount ../web-agent:/app + WATCHPACK_POLLING=true.
+  # Polling нужен, потому что file events из macOS не всегда пробрасываются
+  # через VirtioFS/gRPC-FUSE в контейнер — inotify внутри может не срабатывать
+  # на изменения снаружи. Polling ест немного CPU, но для dev это норма.
+  #
+  # Анонимные volumes для /app/node_modules и /app/.next: без них bind-mount
+  # затирает node_modules из image и билд-кэш Next.js при hot reload.
+  web-agent:
+    build:
+      context: ../web-agent
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ../web-agent:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      # NEXT_PUBLIC_* инжектится Next.js в клиентский bundle на этапе сборки/старта.
+      # Тут прописан хардкод под dev-стек — если понадобится другой backend URL,
+      # переопределяем через .env.dev.
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:4000
+      # File watching: без polling'а hot reload на Docker Desktop for Mac
+      # часто пропускает изменения (inotify не пробрасывается через FUSE).
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      - token-server
+
+volumes:
+  redis-dev-data:

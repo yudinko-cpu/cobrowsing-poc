@@ -1,0 +1,23 @@
+# Dev-образ web-agent'а. Отдельный от прода: тащит devDependencies и запускается
+# через `next dev` с hot reload. Прод-контейнер (если понадобится) — отдельным
+# Dockerfile с `next build && next start`.
+#
+# Задача этого образа — только собрать node_modules внутри image, чтобы bind-mount
+# исходников из compose перекрывал всё, кроме node_modules и .next (для них в
+# compose используются anonymous volumes).
+FROM node:20-alpine
+WORKDIR /app
+
+# Отдельный layer с зависимостями — переиспользуется, пока package.json/lock не менялись.
+COPY package.json package-lock.json* ./
+RUN npm install
+
+# Копируем исходники на всякий случай (для standalone-запуска без bind-mount).
+# В dev-compose они всё равно перекрываются volume'ом.
+COPY . .
+
+EXPOSE 3000
+
+# -H 0.0.0.0 — Next.js по умолчанию биндится на localhost внутри контейнера,
+# и порт с хоста тогда не отвечает. Явно слушаем все интерфейсы.
+CMD ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]

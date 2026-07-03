@@ -1,0 +1,84 @@
+# Self-hosted LiveKit deployment для cobrowsing POC.
+# Запуск: docker compose up -d
+# Перед стартом: скопировать .env.example в .env и заполнить значения.
+
+services:
+  # LiveKit SFU — основной WebRTC сервер.
+  # network_mode: host критически важен — WebRTC требует прямого доступа
+  # к UDP-портам без NAT внутри Docker.
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit.yaml --node-ip ${PUBLIC_IP}
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  # Redis — state для LiveKit (room registry, participant state)
+  # + KV для token-server (code → room mapping с TTL)
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"  # bind только на localhost
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+  # Token server — выдаёт JWT и управляет жизненным циклом сессии
+  token-server:
+    build: ../backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"  # доступ только через Caddy
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_URL: wss://${DOMAIN}
+      REDIS_URL: redis://host.docker.internal:6379
+      CORS_ORIGIN: https://${AGENT_DOMAIN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+      - livekit
+
+  # Caddy — TLS termination + reverse proxy для API и LiveKit WS.
+  # Автоматически получает Let's Encrypt сертификаты для DOMAIN и AGENT_DOMAIN.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      DOMAIN: ${DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+      AGENT_DOMAIN: ${AGENT_DOMAIN}
+
+  # Egress сервис для server-side recording (P1 #12).
+  # Закомментирован для P0 — раскомментировать когда дойдёте до записи.
+  # egress:
+  #   image: livekit/egress:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     EGRESS_CONFIG_FILE: /etc/egress.yaml
+  #   volumes:
+  #     - ./egress.yaml:/etc/egress.yaml:ro
+  #     - recordings:/recordings
+  #   cap_add:
+  #     - SYS_ADMIN  # для headless chrome
+  #   depends_on:
+  #     - livekit
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:
+  # recordings:

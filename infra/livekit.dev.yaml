@@ -1,0 +1,45 @@
+# LiveKit dev config — только для локальной отладки на host machine.
+# Прод-конфиг — livekit.yaml.
+#
+# Отличия от прода:
+#   - use_external_ip: false (не пытаемся STUN'ить снаружи)
+#   - TURN отключён (в проде тоже отключён для POC)
+#   - Логирование на debug для диагностики ICE
+#   - Контейнер запускается с network_mode: host на Mac (см. docker-compose.dev.yml)
+
+port: 7880
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881
+  # UDP range для WebRTC media. С host networking доступно всё,
+  # ограничения Docker Desktop UDP-forwarding больше не применяются.
+  port_range_start: 50000
+  port_range_end: 60000
+  # Локальная разработка — не нужно STUN discovery
+  use_external_ip: false
+
+# С network_mode: host — LiveKit в host network namespace, Redis доступен
+# как публикация на 127.0.0.1:6379 (см. docker-compose.dev.yml, service redis).
+redis:
+  address: 127.0.0.1:6379
+
+# Ключи. В dev можно использовать простые фиксированные значения —
+# .env.dev.example содержит рабочие дефолты для локального стека.
+keys:
+  # Заменяется через envsubst / sed перед запуском (см. infra/README.dev.md)
+  APIdevkeydevkey: devsecret_at_least_32_chars_replace_before_commit_pls
+
+logging:
+  level: debug
+  json: false
+
+# Лимиты для dev — можно оставить как в проде.
+room:
+  empty_timeout: 300
+  max_participants: 5
+  enabled_codecs:
+    - mime: video/H264
+    - mime: video/VP8
+    - mime: audio/opus
