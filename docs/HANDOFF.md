@@ -59,6 +59,11 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
    env vars required, fail-fast если что-то не задано. Хочешь поменять порт
    token-server или host для реального iPhone — правишь одну строку в .env.dev.
 
+9. **iOS backendURL — `ios/CobrowseTestApp/app/AppConfig.swift`.** Дефолт
+   `127.0.0.1:4000` (Simulator/localhost). Для реального iPhone — override
+   через Scheme → Arguments `-CobrowseBackendURL http://<LAN-IP>:4000`, без
+   правки кода. Хардкод URL в трёх местах (main + 2 Preview'а) больше не живёт.
+
 ## Структура проекта
 
 ```
@@ -88,6 +93,7 @@ cobrowsing-poc/
 │   ├── README.md
 │   └── ExampleApp/                # Тестовое iOS-приложение
 │       ├── CobrowseTestApp.swift  # @main
+│       ├── AppConfig.swift        # backendURL: дефолт + UserDefaults override
 │       ├── ContentView.swift      # TabView + REC-индикатор
 │       ├── SessionTab.swift, AnimationTab, FormsTab, CanvasTab, ZooTab
 │       ├── Info.plist.example
@@ -147,7 +153,10 @@ cobrowsing-poc/
 **Немедленно** (закрыть текущий блокер, выбрать один):
 
 - **A. Тест на реальном iPhone** — Xcode Signing & Capabilities, LAN-IP Mac
-  (сейчас `192.168.10.1`) в `CobrowseTestApp.swift`. Проверит весь end-to-end.
+  задаётся через Scheme → Run → Arguments Passed On Launch:
+  `-CobrowseBackendURL http://<LAN-IP>:4000` (см. `AppConfig.swift`). Тот же
+  LAN-IP положить в `HOST_IP=` в `infra/.env.dev` — токены и NEXT_PUBLIC_API_URL
+  указывают туда же. Никакой правки .swift-файлов. Проверит весь end-to-end.
 - **B. Synthetic video source для Simulator dev** — реализовать `VideoCapturer`
   протокол LiveKit с CoreImage-рендерингом (бегущие часы или таймер). ~50-100
   строк. Полный pipeline можно будет отлаживать без реального устройства.

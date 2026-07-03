@@ -21,5 +21,5 @@ struct SessionTab: View {
 
 #Preview {
     SessionTab()
-        .environmentObject(CobrowseClient(backendURL: URL(string: "http://192.168.10.1:4000")!))
+        .environmentObject(CobrowseClient(backendURL: AppConfig.backendURL))
 }

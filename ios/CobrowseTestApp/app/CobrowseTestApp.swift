@@ -12,13 +12,10 @@ import SwiftUI
 @main
 struct CobrowseTestApp: App {
 
-    // Backend URL: dev-стек по умолчанию.
-    // Если запускаешь на реальном устройстве (не Simulator) — заменить
-    // 127.0.0.1 на LAN-IP машины, где крутится docker.
-    // Пример: URL(string: "http://192.168.1.42:4000")!
-    @StateObject private var client = CobrowseClient(
-        backendURL: URL(string: "http://192.168.10.10:4000")!
-    )
+    // Backend URL — в AppConfig. Дефолт (127.0.0.1) работает для Simulator
+    // и браузера на этом же Mac. Для реального iPhone — override через
+    // Scheme → Run → Arguments: `-CobrowseBackendURL http://<LAN-IP>:4000`.
+    @StateObject private var client = CobrowseClient(backendURL: AppConfig.backendURL)
 
     var body: some Scene {
         WindowGroup {
