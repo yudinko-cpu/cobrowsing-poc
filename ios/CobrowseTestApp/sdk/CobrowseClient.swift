@@ -168,9 +168,30 @@ public final class CobrowseClient: ObservableObject {
     /// Безопасен из любого состояния — идемпотентный cleanup + переход в .ended.
     /// Из .ended/.idle/.error фактически no-op на transport'е (тот сам идемпотентный),
     /// но state форсируем в .ended для консистентности UI.
+    ///
+    /// Дополнительно нотификсирует backend через POST /session/end — best-effort,
+    /// не блокирует стоп при ошибке сети. Backend закроет LiveKit room, обновит
+    /// статус в Redis и вычистит сессию из sessions:active — так dashboard
+    /// оператора синхронно узнаёт, что клиент ушёл.
     public func stopSession() async {
+        // Забираем roomName до cleanup — потом currentRoomName обнулим.
+        let roomToEnd = currentRoomName
+
         await transport.unpublishAll()
         await transport.disconnect()
+
+        if let roomName = roomToEnd {
+            do {
+                try await notifyBackendSessionEnded(roomName: roomName)
+            } catch {
+                // Best-effort: если сеть отвалилась, локальный state
+                // всё равно уйдёт в .ended. Backend'у поможет TTL в Redis.
+                #if DEBUG
+                print("[CobrowseClient] /session/end failed: \(error)")
+                #endif
+            }
+        }
+
         currentRoomName = nil
         state = .ended
     }
@@ -203,6 +224,24 @@ public final class CobrowseClient: ObservableObject {
         let livekitUrl: String
         let token: String
         let expiresIn: Int
+    }
+
+    /// Нотификация backend'а о том, что клиент завершил сессию.
+    /// Backend: LiveKit deleteRoom + Redis status=ended + удаление из sessions:active.
+    private func notifyBackendSessionEnded(roomName: String) async throws {
+        var req = URLRequest(url: backendURL.appendingPathComponent("session/end"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 5
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["roomName": roomName])
+
+        let (_, response) = try await urlSession.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw CobrowseError.backendError(
+                statusCode: (response as? HTTPURLResponse)?.statusCode ?? -1
+            )
+        }
     }
 }
 

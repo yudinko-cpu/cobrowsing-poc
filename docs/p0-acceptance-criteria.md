@@ -69,8 +69,9 @@
 
 - **Given** запущенный token-server и Redis **When** `POST /session/create` с пустым body **Then** ответ содержит поля `code` (6 цифр в формате `XXX-XXX`), `roomName`, `livekitUrl`, `token`, `expiresIn`
 - **Given** созданная сессия **When** проверить `redis-cli GET code:<code>` **Then** ключ существует с TTL ~600 сек
-- **Given** код существует в Redis **When** `POST /agent/join` с этим кодом и agentId **Then** ответ содержит валидный JWT-токен с теми же `roomName` и `livekitUrl`
-- **Given** код использован один раз через `/agent/join` **When** повторный `POST /agent/join` с тем же кодом **Then** ответ `404 {"error":"code not found or expired"}`
+- **Given** код существует в Redis **When** `POST /agent/join` с этим кодом и agentId **Then** ответ содержит валидный JWT-токен с теми же `roomName` и `livekitUrl`, в Redis записывается `claimedByAgentId`, TTL кода продлевается до длительности сессии
+- **Given** код уже заклаймлен agent'ом `A` **When** повторный `POST /agent/join` с тем же кодом и agentId `A` (StrictMode double-mount, F5, network retry) **Then** ответ `200` с валидным токеном (идемпотентно, LiveKit заменит участника по identity)
+- **Given** код заклаймлен agent'ом `A` **When** `POST /agent/join` с этим же кодом но agentId `B` **Then** ответ `409 {"error":"code already claimed by another agent"}`
 - **Given** недействительный код (123-456, которого нет в Redis) **When** `POST /agent/join` **Then** ответ `404`, в логи пишется warning
 - **Given** > 30 запросов с одного IP за минуту **When** следующий запрос **Then** ответ `429 Too Many Requests`
 - **Given** `POST /session/end` с валидным roomName **When** **Then** LiveKit `deleteRoom` вызван, в Redis статус сессии `ended`, room удалён из `sessions:active`
@@ -90,10 +91,11 @@
 **Acceptance criteria**
 
 - **Given** iOS-приложение с SDK **When** вызвать `client.startSession()` **Then** SDK делает POST на `/session/create`, получает код, переводит state в `.streaming(code: "XXX-XXX")`
-- **Given** state == `.streaming` **When** прочитать `client.sessionCode` **Then** возвращается строка вида `"123-456"`
+- **Given** state == `.streaming` или `.reconnecting` **When** прочитать `client.sessionCode` **Then** возвращается строка вида `"123-456"`
 - **Given** агент в web-dashboard **When** ввести код и нажать "Подключиться" **Then** браузер делает POST на `/agent/join`, получает токен, подключается к LiveKit Room, видит видео клиента
 - **Given** код не введён в течение 10 минут **When** агент пытается войти **Then** ответ `404`, агенту показывается «Код истёк»
 - **Given** код 7 цифр или с буквами **When** агент пытается войти **Then** клиентская валидация блокирует запрос с сообщением «Код должен содержать 6 цифр»
+- **Given** тот же agent (persistent agentId в sessionStorage) обновляет страницу viewer'а **When** viewer перезагружается с тем же кодом **Then** POST `/agent/join` возвращает токен (не 404), viewer переподключается к той же комнате
 
 **Артефакты:** `backend/server.js`, `ios/CobrowseClient.swift`, `web-agent/app/page.tsx`
 
@@ -129,11 +131,13 @@
 
 **Acceptance criteria**
 
-- **Given** активная сессия **When** клиент вызывает `stopSession()` **Then** SDK отключается от Room, state == `.ended`, агент в браузере получает событие `participantDisconnected` и UI показывает «Клиент завершил сессию»
-- **Given** активная сессия **When** агент нажимает «Завершить» в браузере **Then** браузер вызывает `POST /session/end`, backend делает `roomService.deleteRoom`, клиент получает `room disconnected`, iOS SDK переходит в `.ended`
+- **Given** активная сессия **When** клиент вызывает `stopSession()` **Then** SDK отключается от Room, дополнительно шлёт `POST /session/end` на backend (best-effort), state == `.ended`, агент в браузере получает событие `participantDisconnected` и UI показывает «Клиент завершил сессию», статус в списке сессий обновляется на `ended` в течение 5 сек
+- **Given** активная сессия **When** агент нажимает «Завершить» в браузере **Then** браузер вызывает `POST /session/end`, backend делает `roomService.deleteRoom`, клиент получает `room disconnected` с reason `.serverClosed`, iOS SDK переходит в `.error("Оператор завершил сессию")` (не в `.ended`, чтобы отличать штатный стоп от закрытия оператором)
 - **Given** активная сессия **When** клиент полностью убивает приложение **Then** LiveKit детектит disconnect (heartbeat fail), backend через 5 мин чистит запись сессии из Redis
 - **Given** сессия началась **When** прошёл 1 час **Then** TTL JWT истёк, токен не обновляется, room закрывается, обе стороны получают disconnect
-- **Given** сессия в `.ended` **When** повторно вызвать `startSession()` **Then** создаётся новая сессия с новым кодом, без ошибок
+- **Given** сессия в `.ended` или `.error` **When** повторно вызвать `startSession()` **Then** создаётся новая сессия с новым кодом, без ошибок и без нужды в рестарте приложения (state machine restartable)
+- **Given** идёт `.streaming` **When** сеть кратковременно отваливается **Then** state переходит в `.reconnecting(code)` (тот же код, та же комната), LiveKit auto-reconnect восстанавливает связь, state возвращается в `.streaming(code)` без явного действия пользователя
+- **Given** идёт `.reconnecting` **When** сеть не восстановилась и LiveKit сдался **Then** state переходит в `.error("Соединение потеряно…")` (не в `.ended` — различаем сетевую потерю от штатного стопа)
 
 **Артефакты:** `ios/CobrowseClient.swift`, `backend/server.js`, `web-agent/app/session/[code]/page.tsx`
 
@@ -152,9 +156,11 @@
 - **Given** агент открывает `https://agent.cobrowse.example.com` **When** **Then** виден input для кода и список активных сессий
 - **Given** есть активные сессии в Redis **When** загрузить главную **Then** список содержит все сессии со статусом `waiting` или `active`, каждые 5 сек список обновляется
 - **Given** агент нажимает «Войти» рядом с сессией **When** **Then** браузер переходит на `/session/<code>`, начинает подключение к LiveKit
-- **Given** на странице сессии клиент уже стримит видео **When** loaded **Then** видео виднеется в `<video>` с `objectFit: contain`, без чёрных полей если соотношение совпадает
-- **Given** клиент ещё не начал стрим **When** loaded **Then** показывается плейсхолдер «Ждём, пока клиент начнёт делиться экраном»
+- **Given** на странице сессии клиент уже стримит видео **When** loaded **Then** видео вписывается в `<video>` с `object-fit: contain` (letterbox), помещается целиком по ширине и по высоте — без скролла
+- **Given** клиент ещё не начал стрим **When** loaded **Then** показывается один из гранулярных плейсхолдеров: "Клиент ещё не подключился", "Ждём публикации экрана", "Видео опубликовано, но не удалось подписаться" — в зависимости от того, где именно застряли
 - **Given** на странице сессии **When** нажать «Завершить» **Then** вызывается `/session/end`, страница редиректит на `/`
+- **Given** insecure origin (HTTP на LAN-IP) **When** открыть viewer **Then** сверху показывается баннер про getUserMedia limitation, LiveKitRoom подключается без auto-mic, видео работает, микрофон включается кнопкой в хедере
+- **Given** секурный origin и mic-кнопка **When** нажать mic-кнопку **Then** getUserMedia запрашивает permission, при отказе кнопка становится красной с расшифровкой в tooltip, при согласии — зелёной, агента слышно у клиента
 
 **Артефакты:** `web-agent/app/page.tsx`, `web-agent/app/session/[code]/page.tsx`
 

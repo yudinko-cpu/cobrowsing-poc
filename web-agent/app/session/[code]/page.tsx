@@ -13,8 +13,10 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useConnectionState,
+  useLocalParticipant,
+  useRoomContext,
 } from '@livekit/components-react';
-import type { DisconnectReason, RemoteTrackPublication, TrackPublication } from 'livekit-client';
+import type { DisconnectReason, RemoteTrack, RemoteTrackPublication, TrackPublication } from 'livekit-client';
 import '@livekit/components-styles';
 import { apiFetch } from '../../../lib/api';
 
@@ -113,8 +115,15 @@ export default function SessionPage({ params }: { params: { code: string } }) {
       token={token}
       serverUrl={serverUrl}
       connect={true}
-      audio={true}    // публикуем мик агента
-      video={false}   // не публикуем видео с камеры агента
+      // audio/video=false: НЕ запрашиваем медиа-permissions при коннекте.
+      // Причины:
+      //   * Chrome блокирует getUserMedia на insecure origin (http://<LAN-IP>);
+      //     при audio=true это ронит всю сессию в onError с NotAllowedError.
+      //   * Даже на secure origin — раньше времени просить permission ухудшает
+      //     UX. Пусть агент подключится, посмотрит экран, а мик включит
+      //     кнопкой, когда действительно надо говорить.
+      audio={false}
+      video={false}
       data-lk-theme="default"
       style={{ height: '100vh' }}
       onConnected={() => console.log('[viewer] LiveKitRoom onConnected')}
@@ -123,6 +132,11 @@ export default function SessionPage({ params }: { params: { code: string } }) {
       }
       onError={(err: Error) => {
         console.error('[viewer] LiveKitRoom onError:', err);
+        // Media permission errors — не фатал: сессия жива, просто без мика.
+        // MicToggle сам покажет статус юзеру.
+        if (err.name === 'NotAllowedError' || /permission/i.test(err.message)) {
+          return;
+        }
         setError(`LiveKit: ${err.message}`);
       }}
     >
@@ -196,14 +210,28 @@ function SessionView({
       }
     : null;
 
+  // WebRTC-статистика по video-track'у. Пуллим раз в секунду напрямую из
+  // RTCPeerConnection'а (LiveKit прокидывает наружу через getRTCStatsReport).
+  const videoStats = useVideoStats(primaryVideo?.publication);
+
+  // ICE-состояние обоих PC (publisher/subscriber). Показывает где именно
+  // застряло: signaling → PC create → gathering → checking → connected.
+  // Ключевой признак "could not establish pc connection" — иметь ICE в
+  // checking/failed и никогда не выйти в connected.
+  const iceState = usePeerConnectionState();
+
   return (
     <div style={styles.viewer}>
+      <InsecureContextBanner />
       <header style={styles.header}>
         <div>
           <strong>Сессия {code.slice(0, 3)}-{code.slice(3)}</strong>
           <span style={styles.liveBadge}>● LIVE</span>
         </div>
-        <button style={styles.endBtn} onClick={onEnd}>Завершить</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <MicToggle />
+          <button style={styles.endBtn} onClick={onEnd}>Завершить</button>
+        </div>
       </header>
 
       <div style={styles.videoContainer}>
@@ -243,6 +271,8 @@ function SessionView({
           participantCount={remoteParticipants.length}
           videoPublications={videoPublications}
           showingTrack={trackRef !== null}
+          videoStats={videoStats}
+          iceState={iceState}
         />
       </div>
 
@@ -278,6 +308,98 @@ function WaitingPlaceholder({
   );
 }
 
+// MARK: — Microphone toggle
+
+/**
+ * Кнопка включения/выключения микрофона агента.
+ *
+ * Отдельный клик по кнопке — единственный момент, когда мы запрашиваем
+ * getUserMedia. Это (а) даёт юзеру контроль, (б) не роняет коннект при
+ * denied-permission, (в) обходит проблему автозапроса на insecure origin.
+ */
+function MicToggle() {
+  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+  const [pending, setPending] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    setPending(true);
+    setMicError(null);
+    try {
+      await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      // Типовые кейсы, дружелюбно расшифровываем:
+      //   NotAllowedError — юзер отказал / браузер блокирует (insecure origin).
+      //   NotFoundError   — нет входного устройства.
+      let hint = err.message;
+      if (err.name === 'NotAllowedError') {
+        hint = window.isSecureContext
+          ? 'Микрофон отклонён. Проверьте permission в настройках сайта.'
+          : 'Небезопасный origin (HTTP на LAN-IP). Chrome не даст мик без HTTPS/localhost.';
+      } else if (err.name === 'NotFoundError') {
+        hint = 'Микрофон не найден.';
+      }
+      setMicError(hint);
+      console.error('[viewer] setMicrophoneEnabled failed:', err);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const bg = micError ? '#dc2626' : isMicrophoneEnabled ? '#059669' : '#374151';
+  const label = pending ? '…' : isMicrophoneEnabled ? '🎤 вкл' : '🎤 выкл';
+  const tooltip = micError ?? (isMicrophoneEnabled ? 'Мик включён' : 'Нажмите чтобы включить мик');
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={pending}
+      title={tooltip}
+      style={{
+        background: bg,
+        color: 'white',
+        border: 'none',
+        padding: '8px 12px',
+        borderRadius: 6,
+        cursor: pending ? 'wait' : 'pointer',
+        fontWeight: 600,
+        fontSize: 13,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// MARK: — Insecure context banner
+
+/**
+ * Предупреждение, если браузер считает origin небезопасным. На таких страницах
+ * getUserMedia не работает вообще — микрофон не включить, ни при каких permission.
+ * Единственный способ — HTTPS или запуск на localhost/127.0.0.1.
+ */
+function InsecureContextBanner() {
+  if (typeof window === 'undefined') return null;
+  if (window.isSecureContext) return null;
+
+  return (
+    <div
+      style={{
+        background: '#f59e0b',
+        color: '#111',
+        padding: '8px 20px',
+        fontSize: 13,
+        fontWeight: 600,
+        textAlign: 'center',
+      }}
+    >
+      ⚠ Insecure origin ({location.origin}). Микрофон работать не будет — Chrome требует HTTPS
+      или localhost для getUserMedia. Видео можно смотреть без ограничений.
+    </div>
+  );
+}
+
 function DebugHUD({
   connectionState,
   roomName,
@@ -285,6 +407,8 @@ function DebugHUD({
   participantCount,
   videoPublications,
   showingTrack,
+  videoStats,
+  iceState,
 }: {
   connectionState: string;
   roomName?: string;
@@ -292,6 +416,8 @@ function DebugHUD({
   participantCount: number;
   videoPublications: Array<{ participantIdentity: string; publication: RemoteTrackPublication }>;
   showingTrack: boolean;
+  videoStats: VideoStats;
+  iceState: PeerConnectionSnapshot;
 }) {
   const lines = [
     `LK conn:     ${connectionState}`,
@@ -304,15 +430,249 @@ function DebugHUD({
       return `  · ${v.participantIdentity}: source=${p.source} subscribed=${p.isSubscribed} muted=${p.isMuted}`;
     }),
     `rendering:   ${showingTrack ? 'yes' : 'no'}`,
+    '',
+    '── ICE / PC ──',
+    `pub  ice: ${iceState.publisherIce ?? '?'}  pc: ${iceState.publisherConn ?? '?'}`,
+    `sub  ice: ${iceState.subscriberIce ?? '?'}  pc: ${iceState.subscriberConn ?? '?'}`,
+    `selected: ${iceState.selectedAddress ?? '?'}`,
+    '',
+    '── video stream ──',
+    `codec:       ${videoStats.codec ?? '?'}`,
+    `resolution:  ${videoStats.resolution ?? '?'}`,
+    `fps:         ${videoStats.fps ?? '?'}`,
+    `bitrate:     ${formatBitrate(videoStats.bitrateBps)}`,
+    `total:       ${formatBytes(videoStats.totalBytes)}`,
+    `RTT:         ${videoStats.rttMs !== undefined ? `${videoStats.rttMs.toFixed(0)} ms` : '?'}`,
+    `pkt loss:    ${videoStats.packetsLost ?? 0} / ${videoStats.packetsReceived ?? 0}`,
   ];
 
   return (
     <div style={styles.debugHud}>
       {lines.map((l, i) => (
-        <div key={i}>{l}</div>
+        <div key={i}>{l || ' '}</div>
       ))}
     </div>
   );
+}
+
+// MARK: — Peer connection state
+
+type PeerConnectionSnapshot = {
+  publisherIce?: RTCIceConnectionState;
+  publisherConn?: RTCPeerConnectionState;
+  subscriberIce?: RTCIceConnectionState;
+  subscriberConn?: RTCPeerConnectionState;
+  /** Адрес выбранного ICE-кандидата ("host:port"), если связь установлена. */
+  selectedAddress?: string;
+};
+
+/**
+ * Возвращает состояние ICE и PC у publisher/subscriber peer connection'ов
+ * и адрес выбранной ICE-пары. Ключевое для диагностики "could not establish
+ * pc connection" — по состоянию видно, где именно застряло:
+ *   - ice=new → PC ещё не создан
+ *   - ice=checking, pc=connecting → идёт connectivity check
+ *   - ice=failed → ни одна пара кандидатов не сработала
+ *   - ice=connected + pc=connected → всё ок
+ *
+ * `useRoomContext()` даёт живой Room; `room.engine.pcManager` — internal,
+ * но стабильно работающее API. Если LiveKit его перепрячут в апгрейде —
+ * поле молча станет undefined, HUD покажет ?.
+ */
+function usePeerConnectionState(): PeerConnectionSnapshot {
+  const room = useRoomContext();
+  const [snap, setSnap] = useState<PeerConnectionSnapshot>({});
+
+  useEffect(() => {
+    if (!room) return;
+    let cancelled = false;
+
+    async function tick() {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pm = (room as any).engine?.pcManager;
+      if (!pm) {
+        if (!cancelled) setSnap({});
+        return;
+      }
+      const pub = pm.publisher;
+      const sub = pm.subscriber;
+
+      // Выбранный адрес: у publisher или subscriber — берём то, что установлено.
+      // getConnectedAddress() резолвит host:port из candidate-pair.
+      let selectedAddress: string | undefined;
+      try {
+        selectedAddress = await (pub?.getConnectedAddress?.() ?? sub?.getConnectedAddress?.());
+      } catch {
+        selectedAddress = undefined;
+      }
+
+      if (cancelled) return;
+      setSnap({
+        publisherIce: pub?.getICEConnectionState?.(),
+        publisherConn: pub?.getConnectionState?.(),
+        subscriberIce: sub?.getICEConnectionState?.(),
+        subscriberConn: sub?.getConnectionState?.(),
+        selectedAddress,
+      });
+    }
+
+    tick();
+    const interval = setInterval(tick, 500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [room]);
+
+  return snap;
+}
+
+// MARK: — Video stats hook
+
+type VideoStats = {
+  /** e.g. "H264", "VP8". */
+  codec?: string;
+  /** "1280x720" */
+  resolution?: string;
+  fps?: number;
+  /** Мгновенный битрейт, bits/s. */
+  bitrateBps: number;
+  /** Кумулятивно с момента подписки. */
+  totalBytes: number;
+  /** Round-trip time, миллисекунды. */
+  rttMs?: number;
+  packetsReceived?: number;
+  packetsLost?: number;
+};
+
+const DEFAULT_VIDEO_STATS: VideoStats = { bitrateBps: 0, totalBytes: 0 };
+
+/**
+ * Пуллит RTCStatsReport с track'а раз в секунду и парсит инкремент байт →
+ * мгновенный битрейт, плюс codec / resolution / fps / RTT / потери.
+ *
+ * RTT берём в порядке приоритета:
+ *   1. candidate-pair.currentRoundTripTime (ICE-уровень, свежее всех)
+ *   2. remote-inbound-rtp.roundTripTime (RTCP receiver report)
+ * Обычно есть либо одно, либо другое.
+ */
+function useVideoStats(publication: RemoteTrackPublication | undefined): VideoStats {
+  const [stats, setStats] = useState<VideoStats>(DEFAULT_VIDEO_STATS);
+  const prevRef = useRef<{ bytesReceived: number; timestamp: number } | null>(null);
+
+  useEffect(() => {
+    const track = publication?.track as RemoteTrack | undefined;
+    if (!track) {
+      setStats(DEFAULT_VIDEO_STATS);
+      prevRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+
+    async function poll() {
+      let report: RTCStatsReport | undefined;
+      try {
+        report = await track!.getRTCStatsReport();
+      } catch {
+        return;
+      }
+      if (cancelled || !report) return;
+
+      // Собираем нужные stat-объекты одним проходом.
+      let inbound: RTCInboundRtpStreamStats | undefined;
+      let remoteInbound: (RTCRtpStreamStats & { roundTripTime?: number }) | undefined;
+      let candidatePair: (RTCIceCandidatePairStats & { currentRoundTripTime?: number }) | undefined;
+      let codecId: string | undefined;
+
+      report.forEach((s: RTCStats) => {
+        if (s.type === 'inbound-rtp' && (s as RTCInboundRtpStreamStats).kind === 'video') {
+          inbound = s as RTCInboundRtpStreamStats;
+          codecId = (s as RTCInboundRtpStreamStats & { codecId?: string }).codecId;
+        } else if (s.type === 'remote-inbound-rtp' && (s as RTCRtpStreamStats).kind === 'video') {
+          remoteInbound = s as RTCRtpStreamStats & { roundTripTime?: number };
+        } else if (
+          s.type === 'candidate-pair' &&
+          (s as RTCIceCandidatePairStats).state === 'succeeded' &&
+          (s as RTCIceCandidatePairStats & { nominated?: boolean }).nominated
+        ) {
+          candidatePair = s as RTCIceCandidatePairStats & { currentRoundTripTime?: number };
+        }
+      });
+
+      if (!inbound) return;
+
+      // Codec: mimeType в отдельной stat, ссылаемся через codecId.
+      let codec: string | undefined;
+      if (codecId) {
+        const codecStat = report.get(codecId) as (RTCStats & { mimeType?: string }) | undefined;
+        if (codecStat?.mimeType) {
+          codec = codecStat.mimeType.replace(/^video\//i, '').toUpperCase();
+        }
+      }
+
+      const inb = inbound as RTCInboundRtpStreamStats & {
+        bytesReceived?: number;
+        framesPerSecond?: number;
+        frameWidth?: number;
+        frameHeight?: number;
+        packetsReceived?: number;
+        packetsLost?: number;
+      };
+      const bytesReceived = inb.bytesReceived ?? 0;
+      const now = performance.now();
+
+      let bitrateBps = 0;
+      if (prevRef.current) {
+        const deltaBytes = bytesReceived - prevRef.current.bytesReceived;
+        const deltaSec = (now - prevRef.current.timestamp) / 1000;
+        if (deltaSec > 0 && deltaBytes >= 0) {
+          bitrateBps = (deltaBytes * 8) / deltaSec;
+        }
+      }
+      prevRef.current = { bytesReceived, timestamp: now };
+
+      const rttSec =
+        candidatePair?.currentRoundTripTime ?? remoteInbound?.roundTripTime ?? undefined;
+      const rttMs = rttSec !== undefined ? rttSec * 1000 : undefined;
+
+      setStats({
+        codec,
+        resolution:
+          inb.frameWidth && inb.frameHeight ? `${inb.frameWidth}x${inb.frameHeight}` : undefined,
+        fps: inb.framesPerSecond !== undefined ? Math.round(inb.framesPerSecond) : undefined,
+        bitrateBps,
+        totalBytes: bytesReceived,
+        rttMs,
+        packetsReceived: inb.packetsReceived,
+        packetsLost: inb.packetsLost,
+      });
+    }
+
+    // Первый опрос сразу, дальше — раз в секунду.
+    poll();
+    const interval = setInterval(poll, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [publication?.track]);
+
+  return stats;
+}
+
+function formatBitrate(bps: number): string {
+  if (bps < 1_000) return `${bps.toFixed(0)} bps`;
+  if (bps < 1_000_000) return `${(bps / 1_000).toFixed(0)} kbps`;
+  return `${(bps / 1_000_000).toFixed(2)} Mbps`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 /** Компактный дамп публикации для консоли — удобно раскрывать в DevTools. */

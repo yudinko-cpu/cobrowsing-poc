@@ -2,6 +2,8 @@
 
 Быстрый брифинг для новой сессии. Читать целиком перед тем, как трогать код.
 
+Последнее обновление: 2026-07-03. **Следующая итерация — VPS-развёртывание (P0-1).**
+
 ## Что это
 
 Self-hosted cobrowsing-решение для техподдержки. iOS клиент шарит экран через
@@ -22,6 +24,42 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
 | Redis | 6379 | State + code→room mapping |
 
 **Backend на 4000, не 3000.** Разнесли специально — Next.js по дефолту 3000.
+
+## Что работает (dev-стек, локально)
+
+- Полный e2e на реальном iPhone (LAN) + Chrome/Safari (127.0.0.1) — экран
+  клиента виден у оператора, аудио идёт обеими сторонами (если включить mic
+  кнопкой в хедере)
+- Docker-стек поднимается одной командой, hot reload и для backend и для web-agent
+- iOS state machine restartable — старт/стоп/старт без рестарта приложения
+- LiveKit auto-reconnect отражается в UI как `.reconnecting(code)`
+- `/agent/join` идемпотентен по (code, agentId) — F5 в браузере, StrictMode
+  double-mount, ретраи — всё OK
+- Web-agent HUD показывает всё для диагностики: connection state, ICE/PC state,
+  участников, треки, codec/bitrate/fps/RTT/total bytes
+
+## Что НЕ работает / имеет workaround
+
+Всё нижеперечисленное — свойство dev-окружения. В prod (VPS + HTTPS + реальные
+домены) эти проблемы исчезают.
+
+1. **iOS Simulator + ReplayKit** — `startCapture` не эмитит фреймы. Publish
+   таймаутит на 10с.
+   → Workaround: тестировать на реальном iPhone.
+
+2. **Docker Desktop for Mac + LAN HOST_IP + Safari** — ICE не собирается.
+   Причины: (a) Docker Desktop не даёт true host networking — LiveKit видит
+   только VM-интерфейсы (192.168.65.x), не Mac's LAN IP; (b) Safari прячет
+   host-кандидаты через mDNS-обфускацию; NAT hairpin через public IP не работает.
+   → Workaround: web-agent открывать через `http://127.0.0.1:3000` (не через
+   LAN IP), в Chrome (не Safari). Backend fetch cross-origin — CORS matcher `dev`
+   разрешает 127.0.0.1 origin к любому backend IP.
+
+3. **Insecure origin (HTTP на LAN IP) + микрофон** — Chrome/Safari блокируют
+   `getUserMedia` на HTTP кроме localhost/127.0.0.1.
+   → Web-agent: `audio={false}` на LiveKitRoom (не тянет мик при коннекте),
+   MicToggle кнопка в хедере — юзер сам включит если secure context, при
+   отказе показывает расшифровку. `InsecureContextBanner` предупреждает.
 
 ## Ключевые архитектурные решения
 
@@ -74,13 +112,21 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
     * `didDisconnectWithReason` различает пользовательский стоп (`.ended`),
       сетевую потерю, серверное закрытие, tokenExpired — каждый со своим
       осмысленным сообщением, а не всё в `.ended`.
+    * `stopSession()` делает best-effort `POST /session/end` на backend —
+      LiveKit room закрывается, дашборд оператора обновляется.
 
 11. **`/agent/join` идемпотентен по `(code, agentId)`.** Первый claim фиксирует
     `claimedByAgentId`, продлевает TTL кода до `SESSION_TTL_SECONDS`. Повторный
     join с тем же agentId — переизлучаем токен (та же identity, LiveKit
     заменяет участника). Другой agentId → 409. Это делает viewer устойчивым
     к React StrictMode double-mount, F5 в браузере и network retry — без
-    компромисса для anti-hijack.
+    компромисса для anti-hijack. Web-agent persist'ит `agentId` в
+    `sessionStorage` — F5 сохраняет identity.
+
+12. **Web-agent viewer расширяет track filter.** Вместо `useTracks([ScreenShare])`
+    использует `useRemoteParticipants()` + fallback на любой video-source
+    (устойчиво к SDK-мисматчам source metadata). Плюс полный HUD с ICE state
+    и стримовой статистикой — левый нижний угол viewer'а.
 
 ## Структура проекта
 
@@ -88,40 +134,45 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
 cobrowsing-poc/
 ├── docs/
 │   ├── architecture.md            # Диаграммы, сетевые требования
-│   ├── p0-acceptance-criteria.md  # 8 P0 тикетов Given/When/Then
+│   ├── p0-acceptance-criteria.md  # 8 P0 тикетов Given/When/Then (свежий)
 │   └── HANDOFF.md                 ← вы здесь
 ├── infra/
-│   ├── docker-compose.dev.yml     # Локальный dev — host mode для LiveKit
-│   ├── docker-compose.yml         # Prod — с Caddy + Let's Encrypt
+│   ├── docker-compose.dev.yml     # dev: host mode для LiveKit, ${VAR} интерполяция
+│   ├── docker-compose.yml         # prod: Caddy + Let's Encrypt (НЕ соответствует
+│   │                              #       новому required-env-only server.js!)
 │   ├── livekit.dev.yaml           # dev config
 │   ├── livekit.yaml               # prod config (TURN закомментирован)
 │   ├── Caddyfile
-│   ├── .env.dev.example
+│   ├── .env.dev.example           # Единый источник dev-конфига
 │   └── README.dev.md              # Пошаговый quickstart для dev
 ├── backend/
-│   ├── server.js                  # Express + JWT + Redis + CORS matcher
-│   ├── Dockerfile
+│   ├── server.js                  # Express + JWT + Redis + CORS matcher.
+│   │                              # Все env vars required (fail-fast).
+│   ├── .env.example               # Прод/standalone-запуск
+│   ├── Dockerfile                 # prod: node server.js
 │   └── package.json               # "dev": "node --watch server.js"
 ├── ios/
-│   ├── CobrowseTransport.swift    # Нейтральный протокол
-│   ├── LiveKitTransport.swift     # LiveKit-реализация (единственный import)
-│   ├── CobrowseClient.swift       # State machine, зависит только от протокола
-│   ├── ConsentPrompt.swift        # UIAlert consent
-│   ├── SessionEntryView.swift     # SwiftUI экран с кодом
-│   ├── README.md
-│   └── ExampleApp/                # Тестовое iOS-приложение
-│       ├── CobrowseTestApp.swift  # @main
-│       ├── AppConfig.swift        # backendURL: дефолт + UserDefaults override
-│       ├── ContentView.swift      # TabView + REC-индикатор (streaming/reconnecting)
-│       ├── SessionTab.swift, AnimationTab, FormsTab, CanvasTab, ZooTab
-│       ├── Info.plist.example
+│   └── CobrowseTestApp/
+│       ├── sdk/
+│       │   ├── CobrowseTransport.swift    # Нейтральный протокол
+│       │   ├── LiveKitTransport.swift     # Единственный import LiveKit
+│       │   ├── CobrowseClient.swift       # State machine
+│       │   ├── ConsentPrompt.swift        # UIAlert consent
+│       │   └── SessionEntryView.swift     # SwiftUI экран с кодом
+│       ├── app/
+│       │   ├── CobrowseTestApp.swift      # @main
+│       │   ├── AppConfig.swift            # backendURL + UserDefaults override
+│       │   ├── ContentView.swift          # TabView + REC-badge (streaming/reconnecting)
+│       │   ├── SessionTab.swift, AnimationTab, FormsTab, CanvasTab, ZooTab
+│       │   └── Info.plist                 # ATS + Mic/Camera usage
 │       └── README.md              # Пошаговый Xcode-setup
 └── web-agent/
     ├── app/
-    │   ├── page.tsx               # Dashboard
-    │   └── session/[code]/page.tsx # Viewer
+    │   ├── page.tsx               # Dashboard: input + список сессий (5s polling)
+    │   └── session/[code]/page.tsx # Viewer + HUD + MicToggle + InsecureBanner
     ├── lib/api.ts                 # apiFetch + URL валидация
     ├── Dockerfile.dev             # Dev-образ для docker-compose
+    ├── .dockerignore
     └── .env.local.example
 ```
 
@@ -157,53 +208,117 @@ cobrowsing-poc/
    тому же agentId переклаймить; (b) `agentId` persist через `sessionStorage`,
    чтобы F5 не генерил новую identity; (c) useRef guard от double-mount.
 
-## Текущее состояние (2026-07-02)
+9. **LiveKit CSS `object-fit: cover` растягивает video.** Дефолт для
+   `.lk-participant-media-video` — cover. Наш inline `objectFit: contain` не
+   бил из-за specificity. Фикс: `.cobrowse-video` класс с `!important` +
+   `minHeight: 0` на flex-item, иначе intrinsic-размер video высаживает контейнер
+   за viewport (нужен скролл).
 
-**Работает:**
-- Docker-стек стартует, LiveKit + Redis + token-server поднимаются
-- iOS Simulator ↔ backend ↔ LiveKit signaling: успешно
-- Web-agent → backend: CORS правильный, `/session/list` работает
-- ICE между iOS Simulator и LiveKit коннектится (data channels открываются)
-- Ping/pong идёт с rtt ~3ms
+10. **Web-agent на insecure origin + `audio={true}` роняет сессию.** `LiveKitRoom`
+    с `audio={true}` тянет `getUserMedia` при коннекте, на HTTP LAN-IP Chrome
+    отказывает с `NotAllowedError`, вся сессия уходит в fatal error. Фикс:
+    `audio={false}` + MicToggle с opt-in клика.
 
-**Известный блокер:**
-- `RPScreenRecorder.startCapture(handler:)` не эмитит фреймы на iOS Simulator.
-  LiveKit SDK ждёт первый sample buffer 10 секунд и таймаутит publish.
-- Симптом в LiveKit-логах: session длится ровно 10.077s, `Leave: CLIENT_INITIATED`,
-  никаких `AddTrackRequest` от клиента.
-- Симптом в iOS-логах: `LocalParticipant._publish [publish] failed... Code=101 "Timed out"`.
+## VPS-развёртывание (P0-1) — что делать в следующей сессии
 
-## Что дальше
+### Готово
 
-**Немедленно** (закрыть текущий блокер, выбрать один):
+- `infra/docker-compose.yml` — prod compose с Caddy + Let's Encrypt (базовый скелет)
+- `infra/livekit.yaml` — prod LiveKit config
+- `infra/Caddyfile` — reverse proxy config
 
-- **A. Тест на реальном iPhone** — Xcode Signing & Capabilities, LAN-IP Mac
-  задаётся через Scheme → Run → Arguments Passed On Launch:
-  `-CobrowseBackendURL http://<LAN-IP>:4000` (см. `AppConfig.swift`). Тот же
-  LAN-IP положить в `HOST_IP=` в `infra/.env.dev` — токены и NEXT_PUBLIC_API_URL
-  указывают туда же. Никакой правки .swift-файлов. Проверит весь end-to-end.
-- **B. Synthetic video source для Simulator dev** — реализовать `VideoCapturer`
-  протокол LiveKit с CoreImage-рендерингом (бегущие часы или таймер). ~50-100
-  строк. Полный pipeline можно будет отлаживать без реального устройства.
-  Переключение real device / simulator через `#if targetEnvironment(simulator)`.
+### НУЖНО ПОПРАВИТЬ ПЕРЕД ДЕПЛОЕМ
 
-**P1 (после закрытия блокера):**
+Prod `docker-compose.yml` был написан ДО того, как мы сделали `server.js`
+required-only. Сейчас там не хватает env vars:
+
+```yaml
+# infra/docker-compose.yml, service token-server, нужно добавить:
+environment:
+  PORT: 4000
+  LIVEKIT_INTERNAL_URL: http://livekit:7880   # или host.docker.internal:7880
+  LOG_LEVEL: info
+```
+
+Иначе server.js упадёт на старте с `Missing env: PORT` / `LIVEKIT_INTERNAL_URL`
+/ `LOG_LEVEL`. Плюс убрать `web-agent` из prod-стека не забыть (или добавить —
+сейчас его нет, нужно решить как деплоить фронт: тот же контейнер что и dev
+но с `next build && next start`, отдельный host, Vercel, или Caddy-static).
+
+Также в prod compose есть `--node-ip ${PUBLIC_IP}` для LiveKit — это правильно
+для VPS с единственным публичным IP.
+
+### План развёртывания
+
+1. **VPS**. Рекомендация из старой версии HANDOFF — Hetzner CX22 (€4.5/мес,
+   2 vCPU, 4GB, безлимитный трафик). Ubuntu 22.04. Публичный IPv4.
+
+2. **DNS**. Три A-записи:
+   - `livekit.example.com` → VPS IP
+   - `api.cobrowse.example.com` → VPS IP
+   - `agent.cobrowse.example.com` → VPS IP
+
+3. **Firewall (ufw / hetzner cloud firewall):**
+   - 22/tcp (SSH)
+   - 80/tcp, 443/tcp (Caddy для HTTPS + LiveKit signaling через WSS)
+   - 7881/tcp (LiveKit TCP fallback)
+   - 50000-60000/udp (LiveKit media)
+   - Redis (6379) и token-server (4000) — НЕ должны быть открыты снаружи
+     (bind на 127.0.0.1 в compose)
+
+4. **`.env` на VPS**. Скопировать пример из `backend/.env.example`,
+   заполнить:
+   ```
+   DOMAIN=livekit.example.com
+   API_DOMAIN=api.cobrowse.example.com
+   AGENT_DOMAIN=agent.cobrowse.example.com
+   PUBLIC_IP=<VPS public IPv4>
+   LIVEKIT_API_KEY=<openssl rand -hex 16>
+   LIVEKIT_API_SECRET=<openssl rand -base64 32>
+   PORT=4000
+   LIVEKIT_INTERNAL_URL=http://host.docker.internal:7880
+   LOG_LEVEL=info
+   ```
+   Синхронизировать key/secret в `livekit.yaml` (пока не автоматизировано —
+   flag в bugs).
+
+5. **Web-agent в prod.** Решить: (a) docker service `next build && next start`
+   в том же compose; (b) отдельный CDN/Vercel. Для POC — вариант (a), но
+   надо добавить сервис в prod compose.
+
+6. **Deploy check-list (P0-1 AC):**
+   - [ ] `docker compose up -d` — все 4 контейнера `Up healthy` через 60с
+   - [ ] `curl https://livekit.example.com/` → 200 + `X-LiveKit-Version`
+   - [ ] `curl https://api.cobrowse.example.com/health` → `{"ok":true}`
+   - [ ] `livekit-cli load-test --duration 30s` — 1 трек публикуется, без ICE
+   - [ ] `nmap` извне: открыты только 80, 443, 7881, 50000-60000/udp; Redis
+     и token-server закрыты
+   - [ ] iOS с реального iPhone → продовский `api.cobrowse.example.com` →
+     оператор с Mac Chrome на `agent.cobrowse.example.com` → видео идёт,
+     `getUserMedia` больше не блокируется (secure context!)
+
+7. **Опционально:** дописать GitHub Actions деплой на push в main (SSH + docker
+   compose pull + up). Или Watchtower.
+
+### Остальные P0-задачи, которые лучше добить параллельно/до VPS
+
+- **P0-2 edge cases** — сворачивание приложения → `.ended`, iPad native resolution
+- **P0-3** — прервать сеть на 5с руками, убедиться что reconnect-state работает
+- **P0-6** — VoiceOver + юридическое ревью текста consent'а
+
+### P1 после P0
 
 - **Аннотации** — через LiveKit data channel (`sendData` уже в `CobrowseTransport`).
-  Оператор рисует в браузере, точки летят к клиенту, отображаются overlay поверх UI.
-- **Voice chat** — mic уже публикуется в SDK, нужно проверить, что оператор слышит.
+  Оператор рисует в браузере, точки летят к клиенту, overlay поверх UI.
+- **Voice chat** — уже работает через MicToggle в web-agent.
 - **Redaction** — маскировать чувствительные views в pixel buffer до энкодера.
   На iOS: `CustomVideoCapturer` из LiveKit + `CIImage`/Metal shader поверх
-  `CMSampleBuffer` от ReplayKit. Есть готовые sensitive-поля в `FormsTab.swift`
-  и `ZooTab.swift` как мишени для тестирования.
+  `CMSampleBuffer` от ReplayKit. Готовые sensitive-поля в `FormsTab.swift`
+  и `ZooTab.swift` как мишени.
 - **Session recording** — LiveKit Egress (закомментированный сервис в
   `docker-compose.yml`). Server-side запись всей сессии в файл.
-
-**Prod (когда POC пройдёт demo):**
-
-- **Реальный VPS** (рекомендую Hetzner CX22 €4.5/мес) — прогнать `infra/README.md`
-- **Caddy + Let's Encrypt** — уже настроено в prod `docker-compose.yml`, нужны домены
-- **P0-1 acceptance criteria** — в `docs/p0-acceptance-criteria.md`
+- **Реальная авторизация агентов** — сейчас `agentId = agent-<random>` в
+  sessionStorage. Заменить на JWT из SSO/OAuth (упомянуто в TODO web-agent).
 
 ## Тестирование матрицы
 
@@ -218,33 +333,55 @@ Example app `CobrowseTestApp` уже покрывает:
 ## Команды-шпаргалка
 
 ```bash
-# Полный ребут инфры
+# --- DEV STACK ---
+
 cd infra
-docker compose -f docker-compose.dev.yml down
-docker compose -f docker-compose.dev.yml up -d --build --force-recreate
+cp .env.dev.example .env.dev    # один раз
 
-# Логи LiveKit
+# Полный ребут инфры
+docker compose -f docker-compose.dev.yml --env-file .env.dev down
+docker compose -f docker-compose.dev.yml --env-file .env.dev up -d --build --force-recreate
+
+# Логи
 docker compose -f docker-compose.dev.yml logs livekit --tail 100 -f
-
-# Логи web-agent (Next.js) / token-server
 docker compose -f docker-compose.dev.yml logs web-agent --tail 100 -f
 docker compose -f docker-compose.dev.yml logs token-server --tail 100 -f
 
-# Диагностический load-test (проверяет, что LiveKit media работает)
+# Web-agent открывать в Chrome через http://127.0.0.1:3000 (не через LAN IP)
+# — Safari + insecure LAN origin убивает ICE (см. известные проблемы #2).
+
+# Web-agent вне docker (если нужно дебажить локально)
+docker compose -f docker-compose.dev.yml stop web-agent
+cd web-agent && npm install && npm run dev
+
+# --- ДИАГНОСТИКА ---
+
+# LiveKit media path (не завязано на клиентов)
 docker run --rm --network host livekit/livekit-cli load-test \
   --url ws://127.0.0.1:7880 \
   --api-key APIdevkeydevkey \
   --api-secret devsecret_at_least_32_chars_replace_before_commit_pls \
   --duration 15s --video-publishers 1
 
-# Web-agent вне docker (если нужно дебажить локально)
-docker compose -f docker-compose.dev.yml stop web-agent
-cd web-agent && npm install && npm run dev
-
-# Проверить CORS правильно работает
+# CORS работает
 curl -i -X OPTIONS http://127.0.0.1:4000/session/list \
   -H 'Origin: http://localhost:3000' \
   -H 'Access-Control-Request-Method: GET'
+
+# Создать тестовую сессию
+curl -X POST http://127.0.0.1:4000/session/create -H 'Content-Type: application/json' -d '{}'
+
+# Chrome WebRTC internals
+# → chrome://webrtc-internals
+# смотрим iceconnectionstatechange, candidate pairs
+
+# --- iOS ---
+
+# Реальный iPhone на LAN:
+# 1. В infra/.env.dev: HOST_IP=<LAN IP Mac> (ipconfig getifaddr en0)
+# 2. В Xcode Scheme → Run → Arguments Passed On Launch:
+#    -CobrowseBackendURL http://<LAN IP>:4000
+# 3. docker compose restart token-server web-agent
 ```
 
 ## Личные предпочтения
@@ -258,6 +395,10 @@ curl -i -X OPTIONS http://127.0.0.1:4000/session/list \
 - `CobrowseTransport` протокол — стабильный контракт, миграция на другой транспорт
   строится на нём. Ломать API — переписывать бизнес-логику.
 - `--node-ip` в `docker-compose.dev.yml` — уже вынесено, добавление обратно ломает
-  ICE (см. bug #6).
-- `network_mode: host` — критично для UDP media path.
-- Prod `docker-compose.yml` — не трогаем без обсуждения, отдельная связка.
+  ICE (см. bug #6). В prod compose стоит `${PUBLIC_IP}` — это правильно.
+- `network_mode: host` — критично для UDP media path и в dev, и в prod.
+- **`server.js` "required-only" стиль** — не добавляй fallback-дефолты. Все env
+  задаются явно через compose. Иначе теряется fail-fast и растёт неявная магия.
+- **`/agent/join` идемпотентность** — не откатывай на "код одноразовый", это
+  ломает StrictMode/F5/retry. Если нужен anti-hijack — уже есть проверка
+  `claimedByAgentId`.

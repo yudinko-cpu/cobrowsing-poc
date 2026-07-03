@@ -35,6 +35,6 @@ enum AppConfig {
            url.scheme?.hasPrefix("http") == true {
             return url
         }
-        return URL(string: "http://127.0.0.1:4000")!
+        return URL(string: "http://192.168.10.10:4000")!
     }()
 }
