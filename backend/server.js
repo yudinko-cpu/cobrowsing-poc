@@ -192,6 +192,16 @@ app.post('/session/create', async (req, res) => {
  * Агент входит в сессию по 6-значному коду.
  * Request:  { code: string, agentId: string }
  * Response: { roomName, livekitUrl, token, customerId }
+ *
+ * Идемпотентен по (code, agentId):
+ * - Первый claim — записываем claimedByAgentId в code:{code}, продлеваем TTL
+ *   до длительности сессии, отдаём токен.
+ * - Повторный claim с тем же agentId — переизлучаем токен (та же identity,
+ *   LiveKit валидно "заменит" участника). Нужно для React StrictMode
+ *   double-invoke, F5 в браузере, ретраев по сети.
+ * - Claim с ДРУГИМ agentId — 409, код уже занят.
+ *
+ * Код не удаляется, а живёт до конца сессии (SESSION_TTL_SECONDS).
  */
 app.post('/agent/join', async (req, res) => {
   try {
@@ -202,10 +212,25 @@ app.post('/agent/join', async (req, res) => {
     const raw = await redis.get(`code:${code}`);
     if (!raw) return res.status(404).json({ error: 'code not found or expired' });
 
-    const { roomName, customerId } = JSON.parse(raw);
+    const codeEntry = JSON.parse(raw);
+    const { roomName, customerId, claimedByAgentId } = codeEntry;
 
-    // Код одноразовый — удаляем сразу, чтобы повторный ввод не работал
-    await redis.del(`code:${code}`);
+    // Anti-hijack: если код уже claim'нут ДРУГИМ агентом — отказываем.
+    // Одному агенту дозволено переклаймить свой же код сколько угодно раз
+    // (StrictMode, refresh, retry).
+    if (claimedByAgentId && claimedByAgentId !== agentId) {
+      logger.warn(
+        { code, requestedBy: agentId, claimedBy: claimedByAgentId },
+        'agent/join: code already claimed by another agent'
+      );
+      return res.status(409).json({ error: 'code already claimed by another agent' });
+    }
+
+    // Первый claim — фиксируем agentId и продлеваем TTL. Далее — no-op update
+    // (перезапись той же связки), нужен только для reset'а TTL.
+    codeEntry.claimedByAgentId = agentId;
+    codeEntry.claimedAt = codeEntry.claimedAt || Date.now();
+    await redis.setex(`code:${code}`, SESSION_TTL_SECONDS, JSON.stringify(codeEntry));
 
     // Обновляем статус сессии
     const sessionRaw = await redis.get(`session:${roomName}`);
@@ -213,7 +238,7 @@ app.post('/agent/join', async (req, res) => {
       const session = JSON.parse(sessionRaw);
       session.status = 'active';
       session.agentId = agentId;
-      session.agentJoinedAt = Date.now();
+      session.agentJoinedAt = session.agentJoinedAt || Date.now();
       await redis.setex(`session:${roomName}`, SESSION_TTL_SECONDS, JSON.stringify(session));
     }
 
@@ -230,7 +255,8 @@ app.post('/agent/join', async (req, res) => {
       canPublishData: true,
     });
 
-    logger.info({ roomName, agentId, customerId }, 'agent joined');
+    const isReclaim = codeEntry.claimedAt !== Date.now();
+    logger.info({ roomName, agentId, customerId, isReclaim }, 'agent joined');
 
     res.json({
       roomName,

@@ -77,6 +77,7 @@ public final class LiveKitTransport: CobrowseTransport {
             height: Int32(options.dimensions.height)
         )
         let track = LocalVideoTrack.createInAppScreenShareTrack(
+            name: Track.screenShareVideoName,
             options: ScreenShareCaptureOptions(
                 dimensions: dims,
                 fps: options.fps,

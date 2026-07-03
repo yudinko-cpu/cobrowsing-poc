@@ -75,6 +75,13 @@ ReplayKit → WebRTC → LiveKit SFU → web-agent в браузере у опе
       сетевую потерю, серверное закрытие, tokenExpired — каждый со своим
       осмысленным сообщением, а не всё в `.ended`.
 
+11. **`/agent/join` идемпотентен по `(code, agentId)`.** Первый claim фиксирует
+    `claimedByAgentId`, продлевает TTL кода до `SESSION_TTL_SECONDS`. Повторный
+    join с тем же agentId — переизлучаем токен (та же identity, LiveKit
+    заменяет участника). Другой agentId → 409. Это делает viewer устойчивым
+    к React StrictMode double-mount, F5 в браузере и network retry — без
+    компромисса для anti-hijack.
+
 ## Структура проекта
 
 ```
@@ -142,6 +149,13 @@ cobrowsing-poc/
 
 7. **Info.plist генерируется автоматически в Xcode 13+** — либо `INFOPLIST_KEY_*`
    в Build Settings, либо физический файл + `GENERATE_INFOPLIST_FILE=NO`.
+
+8. **React StrictMode + одноразовый `/agent/join`** — в dev Next.js `useEffect`
+   фаерится дважды. Первый POST /agent/join удалял код из Redis, второй получал
+   404 "code not found or expired" → UI показывал ошибку, хотя iOS уже в комнате.
+   Фикс: (a) backend не удаляет код, помечает `claimedByAgentId` и позволяет
+   тому же agentId переклаймить; (b) `agentId` persist через `sessionStorage`,
+   чтобы F5 не генерил новую identity; (c) useRef guard от double-mount.
 
 ## Текущее состояние (2026-07-02)
 
