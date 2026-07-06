@@ -148,6 +148,11 @@ jobs:
             docker compose --env-file .env pull backend web-agent
             docker compose --env-file .env up -d --remove-orphans
 
+            # 5.1) LiveKit читает livekit.yaml один раз при старте, bind-mount
+            #      не триггерит recreate. Форсим рестарт, чтобы новые ключи
+            #      после envsubst-шага реально применились.
+            docker compose --env-file .env restart livekit
+
             # 6) Smoke-check: token-server /health должен ответить 200 в течение 60с.
             for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
