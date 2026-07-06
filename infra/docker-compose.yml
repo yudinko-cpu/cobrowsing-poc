@@ -1,11 +1,29 @@
-# Self-hosted LiveKit deployment для cobrowsing POC.
-# Запуск: docker compose up -d
-# Перед стартом: скопировать .env.example в .env и заполнить значения.
+# Prod-стек: self-hosted LiveKit + token-server + web-agent + Caddy.
+#
+# Образы backend и web-agent тянутся из GHCR (пушит GHA-workflow из .github/).
+# Тег контролируется через IMAGE_TAG в infra/.env — GHA переписывает его на
+# каждый деплой (git SHA), локальный `docker compose up` без явного тега
+# берёт `latest`.
+#
+# ЗАПУСК на VPS:
+#   cd /opt/cobrowsing/infra
+#   cp .env.example .env       # один раз, заполнить домены/ключи/PUBLIC_IP
+#   docker compose --env-file .env pull
+#   docker compose --env-file .env up -d
+#
+# СЕТЬ:
+#   - LiveKit — network_mode: host (обязательно для UDP media).
+#   - Caddy — bridge, публикует 80/443 на хост, ходит к bridge-сервисам по
+#     service name (backend, web-agent), к LiveKit — через host.docker.internal.
+#   - Остальные — дефолтная bridge-сеть compose, общаются по service name.
+#
+# ПОРТЫ, СМОТРЯЩИЕ ВОВНЕ:
+#   - Caddy: 80/tcp, 443/tcp
+#   - LiveKit: 7881/tcp (TCP fallback), 50000-60000/udp (media)
+#   Backend и Redis наружу НЕ выставлены (bridge network, доступ только через Caddy).
 
 services:
-  # LiveKit SFU — основной WebRTC сервер.
-  # network_mode: host критически важен — WebRTC требует прямого доступа
-  # к UDP-портам без NAT внутри Docker.
+  # LiveKit SFU — WebRTC media. Host mode обязателен.
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
@@ -16,37 +34,66 @@ services:
     depends_on:
       - redis
 
-  # Redis — state для LiveKit (room registry, participant state)
-  # + KV для token-server (code → room mapping с TTL)
+  # Redis — state для LiveKit и code→room mapping для backend.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"  # bind только на localhost
+    # Наружу не публикуем — доступ по имени сервиса из bridge-сети compose.
     volumes:
       - redis-data:/data
     command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
-  # Token server — выдаёт JWT и управляет жизненным циклом сессии
-  token-server:
-    build: ../backend
+  # Token-server (JWT + session lifecycle). Образ из GHCR.
+  backend:
+    image: ghcr.io/${GHCR_OWNER}/cobrowsing-poc-backend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:3000"  # доступ только через Caddy
+      # Локальный bind — не выставляется наружу, но позволяет curl'ить /health
+      # с самого VPS (GHA smoke-check + ручная диагностика).
+      - "127.0.0.1:4000:4000"
     environment:
+      # server.js required-only — все переменные обязательны, дефолтов нет.
+      PORT: 4000
+      LIVEKIT_URL: wss://${DOMAIN}
+      # backend ходит к LiveKit по HTTP (host mode), не через WSS-фронт Caddy —
+      # экономим TLS-handshake и не зависим от того, поднялся ли уже Caddy.
+      LIVEKIT_INTERNAL_URL: http://host.docker.internal:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
-      LIVEKIT_URL: wss://${DOMAIN}
-      REDIS_URL: redis://host.docker.internal:6379
+      REDIS_URL: redis://redis:6379
       CORS_ORIGIN: https://${AGENT_DOMAIN}
+      LOG_LEVEL: info
     extra_hosts:
+      # host.docker.internal → хост-машина. LiveKit слушает :7880 на хосте (host mode).
       - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
-      - livekit
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
-  # Caddy — TLS termination + reverse proxy для API и LiveKit WS.
-  # Автоматически получает Let's Encrypt сертификаты для DOMAIN и AGENT_DOMAIN.
+  # Web-agent (Next.js SSR). Образ из GHCR.
+  # NEXT_PUBLIC_API_URL зашит в бандл на build-time (см. web-agent/Dockerfile
+  # и GHA build-args) — на рантайме передавать бессмысленно.
+  web-agent:
+    image: ghcr.io/${GHCR_OWNER}/cobrowsing-poc-web-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - backend
+
+  # Caddy — TLS termination + reverse proxy.
+  # Bridge network: 80/443 наружу, до backend/web-agent — по service name,
+  # до LiveKit (host mode) — через host.docker.internal:7880.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -61,24 +108,14 @@ services:
       DOMAIN: ${DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
       AGENT_DOMAIN: ${AGENT_DOMAIN}
-
-  # Egress сервис для server-side recording (P1 #12).
-  # Закомментирован для P0 — раскомментировать когда дойдёте до записи.
-  # egress:
-  #   image: livekit/egress:latest
-  #   restart: unless-stopped
-  #   environment:
-  #     EGRESS_CONFIG_FILE: /etc/egress.yaml
-  #   volumes:
-  #     - ./egress.yaml:/etc/egress.yaml:ro
-  #     - recordings:/recordings
-  #   cap_add:
-  #     - SYS_ADMIN  # для headless chrome
-  #   depends_on:
-  #     - livekit
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+      - web-agent
+      - livekit
 
 volumes:
   redis-data:
   caddy-data:
   caddy-config:
-  # recordings:

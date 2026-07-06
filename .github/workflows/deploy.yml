@@ -1,0 +1,151 @@
+# CI/CD: push → build → deploy на VPS.
+#
+# Триггер: push в main (backend/, web-agent/, infra/, workflow сам).
+# Изменения в ios/ и docs/ не триггерят — не имеет смысла ребилдить контейнеры.
+#
+# Пайплайн:
+#   1) build-and-push — билдит два образа (backend + web-agent), пушит в GHCR
+#      с двумя тегами: git SHA (для rollback) и latest.
+#   2) deploy — SSH на VPS, git pull compose-файлов, docker compose pull + up -d,
+#      smoke-check /health.
+#
+# Секреты (GitHub → Settings → Secrets and variables → Actions):
+#   VPS_SSH_HOST          — IP или домен VPS (e.g. api.cobrowse.example.com)
+#   VPS_SSH_USER          — юзер для SSH (e.g. deploy)
+#   VPS_SSH_KEY           — приватный ключ (весь ~/.ssh/id_ed25519, включая BEGIN/END строки)
+#   VPS_SSH_PORT          — (опц.) кастомный SSH порт, дефолт 22
+#
+# Переменные (Settings → Secrets and variables → Actions → Variables):
+#   NEXT_PUBLIC_API_URL   — https://api.cobrowse.example.com (или ваш API-домен).
+#                           Бейкается в web-agent на этапе сборки (Next.js
+#                           NEXT_PUBLIC_* — build-time, не runtime).
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'web-agent/**'
+      - 'infra/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:  # можно запустить руками из UI
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false  # не отменяем — досматриваем предыдущий деплой до конца
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BACKEND: ${{ github.repository }}-backend
+  IMAGE_WEB_AGENT: ${{ github.repository }}-web-agent
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # для push в GHCR
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        # Полный SHA как тег — уникально и годится для rollback.
+        run: echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          # Кэш через GHA — на порядок быстрее пересборка при мелких правках.
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:latest
+
+      - name: Build & push web-agent
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web-agent
+          file: ./web-agent/Dockerfile
+          push: true
+          cache-from: type=gha,scope=web-agent
+          cache-to: type=gha,scope=web-agent,mode=max
+          # NEXT_PUBLIC_* инжектится Next'ом при сборке — API URL нужно передать
+          # как build-arg, иначе он окажется undefined и fetch пойдёт в никуда
+          # (см. web-agent/lib/api.ts).
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_WEB_AGENT }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_WEB_AGENT }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_SSH_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          # script_stop: любая ошибка в script (exit != 0) валит деплой.
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /opt/cobrowsing
+
+            # 1) Обновляем compose/config-файлы из репозитория (сами образы уже в GHCR).
+            git fetch --quiet origin main
+            git reset --hard origin/main
+
+            # 2) Пинним тег текущего SHA в .env — docker compose подхватит через ${IMAGE_TAG}.
+            #    Если .env уже содержит IMAGE_TAG=, заменяем; иначе — дописываем.
+            if grep -q '^IMAGE_TAG=' infra/.env; then
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}|" infra/.env
+            else
+              echo "IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}" >> infra/.env
+            fi
+
+            # 3) Логин в GHCR (образы приватные — если публичные, шаг можно убрать).
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+              -u ${{ github.actor }} --password-stdin
+
+            # 4) Pull новых образов + rolling restart.
+            cd infra
+            docker compose --env-file .env pull backend web-agent
+            docker compose --env-file .env up -d --remove-orphans
+
+            # 5) Smoke-check: token-server /health должен ответить 200 в течение 60с.
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+                echo "backend healthy"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "backend /health не отвечает — откатываемся"
+            docker compose --env-file .env logs --tail=100 backend
+            exit 1

@@ -1,16 +1,14 @@
-# Caddy reverse proxy + auto-TLS.
-# Caddy сам получает Let's Encrypt сертификаты для всех указанных доменов.
+# Caddy reverse proxy + auto-TLS через Let's Encrypt.
+# Три хоста: LiveKit signaling, token API, web-agent (Next.js SSR).
+#
+# Caddy сам поднимает ACME challenge на :80 и получает сертификаты для всех
+# трёх доменов. DNS A-записи должны быть настроены ДО первого старта, иначе
+# challenge не пройдёт и в логах будет цикл retry.
 
-# LiveKit WebSocket (signaling)
+# LiveKit WebSocket signaling.
+# Host mode для LiveKit → доступен как host.docker.internal:7880 из bridge-сети Caddy.
 {$DOMAIN} {
-    reverse_proxy localhost:7880
-
-    # WebSocket upgrade headers (Caddy делает это автоматически, но явно — надёжнее)
-    @websockets {
-        header Connection *Upgrade*
-        header Upgrade websocket
-    }
-    reverse_proxy @websockets localhost:7880
+    reverse_proxy host.docker.internal:7880
 
     log {
         output file /data/livekit-access.log
@@ -18,9 +16,9 @@
     }
 }
 
-# Token API
+# Token API (backend в bridge-сети compose — доступен по service name).
 {$API_DOMAIN} {
-    reverse_proxy localhost:3000
+    reverse_proxy backend:4000
 
     log {
         output file /data/api-access.log
@@ -28,12 +26,9 @@
     }
 }
 
-# Web agent dashboard (для POC — отдаём готовый build из next export)
-# Для dev — закомментировать, запускать локально через npm run dev
+# Web-agent (Next.js SSR — не статика, поэтому reverse_proxy, не file_server).
 {$AGENT_DOMAIN} {
-    root * /srv/web-agent
-    file_server
-    try_files {path} /index.html
+    reverse_proxy web-agent:3000
 
     log {
         output file /data/agent-access.log
