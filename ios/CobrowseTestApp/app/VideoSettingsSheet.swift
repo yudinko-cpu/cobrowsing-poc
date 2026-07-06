@@ -30,9 +30,13 @@ struct VideoSettingsSheet: View {
 
     /// Ресолюционные пресеты — фиксированный набор из VideoDimensions.
     /// Держим отдельно, чтобы Picker знал перечислимый список.
+    /// Мелкие разрешения (240p/360p) нужны для low-bitrate экспериментов —
+    /// на 100 kbps 720p превращается в кашу, а 240p ещё читаемый.
     private let resolutions: [(label: String, value: VideoDimensions)] = [
-        ("480p (854×480)",   .h480_169),
-        ("720p (1280×720)",  .h720_169),
+        ("240p (426×240)",    .h240_169),
+        ("360p (640×360)",    .h360_169),
+        ("480p (854×480)",    .h480_169),
+        ("720p (1280×720)",   .h720_169),
         ("1080p (1920×1080)", .h1080_169),
     ]
 
@@ -83,19 +87,20 @@ struct VideoSettingsSheet: View {
                 }
 
                 Section {
-                    // Slider на [500, 5000] kbps, шаг 250 — удобно двигать пальцем.
+                    // Slider [50, 1000] kbps, шаг 25 — фокус на low-bitrate
+                    // экспериментах. Выше 1000 kbps для нашего 1↔1 PoC не нужно.
                     Slider(
                         value: bitrateBinding,
-                        in: 500...5000,
-                        step: 250
+                        in: 50...1000,
+                        step: 25
                     )
-                    Text("\(draft.maxBitrateKbps ?? 1500) kbps")
+                    Text("\(draft.maxBitrateKbps ?? 500) kbps")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Максимальный битрейт")
                 } footer: {
-                    Text("Верхняя граница. LiveKit адаптивно снижает при узкой сети.")
+                    Text("Верхняя граница. LiveKit адаптивно снижает при узкой сети. Для low-bitrate тестов подбирай разрешение под битрейт: 100 kbps → 240p.")
                 }
 
                 if let err = errorMessage {
@@ -139,7 +144,7 @@ struct VideoSettingsSheet: View {
     /// значит хочет явное значение.
     private var bitrateBinding: Binding<Double> {
         Binding(
-            get: { Double(draft.maxBitrateKbps ?? 1500) },
+            get: { Double(draft.maxBitrateKbps ?? 500) },
             set: { draft.maxBitrateKbps = Int($0) }
         )
     }

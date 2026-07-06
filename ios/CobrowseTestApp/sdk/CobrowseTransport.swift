@@ -48,6 +48,8 @@ public struct VideoDimensions: Equatable, Hashable, Sendable {
         self.height = height
     }
 
+    public static let h240_169 = VideoDimensions(width: 426, height: 240)
+    public static let h360_169 = VideoDimensions(width: 640, height: 360)
     public static let h480_169 = VideoDimensions(width: 854, height: 480)
     public static let h720_169 = VideoDimensions(width: 1280, height: 720)
     public static let h1080_169 = VideoDimensions(width: 1920, height: 1080)
@@ -93,7 +95,7 @@ public struct ScreenShareOptions: Sendable, Equatable {
     public init(dimensions: VideoDimensions = .h720_169,
                 fps: Int = 15,
                 codec: VideoCodec = .h264,
-                maxBitrateKbps: Int? = 1500,
+                maxBitrateKbps: Int? = 500,
                 useBroadcastExtension: Bool = false) {
         self.dimensions = dimensions
         self.fps = fps

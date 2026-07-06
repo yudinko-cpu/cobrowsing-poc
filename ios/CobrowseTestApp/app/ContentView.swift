@@ -2,14 +2,17 @@
 //  ContentView.swift
 //  CobrowseTestApp
 //
-//  TabView с 5 экранами для тестирования screen share + REC-индикатор
-//  в safe-area, который виден на любом табе.
+//  TabView с 5 экранами для тестирования screen share + REC-индикатор в верхнем
+//  safe-area (виден на любом табе) + floating шестерёнка настроек видео
+//  (в верхнем-правом углу, тоже поверх всех табов). Обе кнопки-оверлея живут
+//  здесь, а не в отдельных табах, чтобы поведение было консистентным везде.
 //
 
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var client: CobrowseClient
+    @State private var showVideoSettings = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -30,10 +33,52 @@ struct ContentView: View {
                     .tabItem { Label("Всякое", systemImage: "square.grid.2x2") }
             }
 
-            // Постоянный индикатор шаринга поверх всех табов.
+            // Постоянный REC-индикатор в центре сверху.
             RecBadge()
                 .padding(.top, 8)
         }
+        // Шестерёнка настроек — в правом верхнем углу поверх всех табов.
+        // Только когда есть живой трек, который имеет смысл перенастраивать
+        // (в .reconnecting republish кинет .notStreaming, так что скрываем).
+        .overlay(alignment: .topTrailing) {
+            if isStreaming {
+                VideoSettingsButton {
+                    showVideoSettings = true
+                }
+                .padding(.top, 8)
+                .padding(.trailing, 12)
+                // На iOS 16+ transitions работают из коробки, лёгкий fade
+                // избавляет от резкого моргания при старте/стопе сессии.
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isStreaming)
+        .sheet(isPresented: $showVideoSettings) {
+            VideoSettingsSheet(current: client.screenShareOptions)
+                .environmentObject(client)
+        }
+    }
+
+    private var isStreaming: Bool {
+        if case .streaming = client.state { return true }
+        return false
+    }
+}
+
+// MARK: - Floating video settings button
+
+private struct VideoSettingsButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(.black.opacity(0.75)))
+        }
+        .accessibilityLabel("Настройки видео")
     }
 }
 

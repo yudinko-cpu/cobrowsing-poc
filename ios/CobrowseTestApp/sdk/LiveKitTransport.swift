@@ -31,6 +31,11 @@ public final class LiveKitTransport: CobrowseTransport {
     private var screenTrack: LocalVideoTrack?
     private var audioTrack: LocalAudioTrack?
 
+    /// Наш custom capturer вместо штатного InAppScreenCapturer.
+    /// Держим ссылку, чтобы (а) не был gc'ен пока трек живёт, (б) остановить
+    /// при unpublish/republish/disconnect.
+    private var screenCapturer: ScaledScreenShareCapturer?
+
     /// LiveKit требует RoomDelegate — держим его отдельным объектом, чтобы не
     /// торчать LiveKit-протоколом наружу через LiveKitTransport.
     private var roomDelegateProxy: RoomDelegateProxy!
@@ -63,6 +68,8 @@ public final class LiveKitTransport: CobrowseTransport {
 
     public func disconnect() async {
         await room.disconnect()
+        await screenCapturer?.stop()
+        screenCapturer = nil
         screenTrack = nil
         audioTrack = nil
         connectionState = .disconnected
@@ -72,25 +79,41 @@ public final class LiveKitTransport: CobrowseTransport {
         guard connectionState == .connected else { throw TransportError.notConnected }
         guard screenTrack == nil else { throw TransportError.alreadyPublishing }
 
-        let dims = Dimensions(
-            width: Int32(options.dimensions.width),
-            height: Int32(options.dimensions.height)
-        )
-        let track = LocalVideoTrack.createInAppScreenShareTrack(
+        // Buffer track — вручную кормим capturer'а из ScaledScreenShareCapturer,
+        // который между RPScreenRecorder и BufferCapturer вставляет CIImage-даунскейл.
+        // Штатный createInAppScreenShareTrack игнорирует dimensions и отдаёт
+        // нативное разрешение iPhone (см. заметки в ScaledScreenShareCapturer.swift).
+        let track = LocalVideoTrack.createBufferTrack(
             name: Track.screenShareVideoName,
-            options: ScreenShareCaptureOptions(
-                dimensions: dims,
-                fps: options.fps,
-                useBroadcastExtension: options.useBroadcastExtension
-            )
+            source: .screenShareVideo
         )
+        guard let bufferCapturer = track.capturer as? BufferCapturer else {
+            throw TransportError.publishFailed("track.capturer не BufferCapturer — SDK изменил API?")
+        }
+
+        let downscaler = ScaledScreenShareCapturer()
+        downscaler.onSampleBuffer = { sample in
+            bufferCapturer.capture(sample)
+        }
+
+        let shortSide = min(options.dimensions.width, options.dimensions.height)
+        do {
+            // start() возвращается ТОЛЬКО после первого эмитнутого кадра, иначе
+            // publish упадёт с "publish timeout" (dimensions ещё не резолвились).
+            try await downscaler.start(targetShortSide: shortSide, targetFps: options.fps)
+        } catch {
+            throw TransportError.publishFailed("screen capture start: \(error.localizedDescription)")
+        }
+
         do {
             try await room.localParticipant.publish(
                 videoTrack: track,
                 options: buildVideoPublishOptions(from: options)
             )
             screenTrack = track
+            screenCapturer = downscaler
         } catch {
+            await downscaler.stop()
             throw TransportError.publishFailed(error.localizedDescription)
         }
     }
@@ -98,20 +121,29 @@ public final class LiveKitTransport: CobrowseTransport {
     public func republishScreenShare(options: ScreenShareOptions) async throws {
         guard connectionState == .connected else { throw TransportError.notConnected }
 
-        // Снимаем текущую публикацию (если есть) — LiveKit не умеет hot-swap
-        // preferredCodec/encoding, поэтому только через unpublish+publish.
+        // Снимаем текущую публикацию и останавливаем capturer — новые dims/fps
+        // требуют пересоздания CVPixelBufferPool + track с новой BufferCapturer'ой.
         if let s = screenTrack {
             if let pub = room.localParticipant.localVideoTracks.first(where: { $0.track === s }) {
                 try? await room.localParticipant.unpublish(publication: pub)
             }
             screenTrack = nil
         }
+        await screenCapturer?.stop()
+        screenCapturer = nil
+
         try await publishScreenShare(options: options)
     }
 
     /// Маппинг нейтральных ScreenShareOptions → LiveKit VideoPublishOptions.
-    /// preferredCodec — гарантия best-effort, финальный кодек определяет SFU
+    ///
+    /// preferredCodec — best-effort, финальный кодек определяет SFU
     /// на основе enabled_codecs в livekit.yaml.
+    ///
+    /// simulcast: false — разрешение уже зафиксировано на входе
+    /// (ScaledScreenShareCapturer даунскейлит CVPixelBuffer до целевого).
+    /// Simulcast с single-layer и layers-пресеты SDK не помогли обуздать
+    /// screen share dimensions — теперь мы сами сжимаем перед encoder'ом.
     private func buildVideoPublishOptions(from options: ScreenShareOptions) -> VideoPublishOptions {
         let liveKitCodec: LiveKit.VideoCodec = switch options.codec {
         case .h264: .h264
@@ -119,12 +151,14 @@ public final class LiveKitTransport: CobrowseTransport {
         case .vp9:  .vp9
         case .av1:  .av1
         }
-        let encoding: VideoEncoding? = options.maxBitrateKbps.map { kbps in
-            VideoEncoding(maxBitrate: kbps * 1000, maxFps: options.fps)
-        }
+        let encoding = VideoEncoding(
+            maxBitrate: (options.maxBitrateKbps ?? 500) * 1000,
+            maxFps: options.fps
+        )
         return VideoPublishOptions(
             name: Track.screenShareVideoName,
             screenShareEncoding: encoding,
+            simulcast: false,
             preferredCodec: liveKitCodec
         )
     }
@@ -152,6 +186,8 @@ public final class LiveKitTransport: CobrowseTransport {
             }
             screenTrack = nil
         }
+        await screenCapturer?.stop()
+        screenCapturer = nil
         if let a = audioTrack {
             if let pub = room.localParticipant.localAudioTracks.first(where: { $0.track === a }) {
                 try? await room.localParticipant.unpublish(publication: pub)
