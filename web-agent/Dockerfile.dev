@@ -5,7 +5,7 @@
 # Задача этого образа — только собрать node_modules внутри image, чтобы bind-mount
 # исходников из compose перекрывал всё, кроме node_modules и .next (для них в
 # compose используются anonymous volumes).
-FROM node:20-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # Отдельный layer с зависимостями — переиспользуется, пока package.json/lock не менялись.

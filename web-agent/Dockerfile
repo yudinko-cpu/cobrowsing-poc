@@ -11,12 +11,12 @@
 # dev-дефолт (см. web-agent/lib/api.ts). GHA-workflow передаёт его из
 # repository variable NEXT_PUBLIC_API_URL.
 
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
