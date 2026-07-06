@@ -39,7 +39,7 @@ public enum TransportDisconnectReason: Sendable {
 }
 
 /// Разрешение видео для screen-share. Транспорт-нейтральный тип.
-public struct VideoDimensions: Equatable, Sendable {
+public struct VideoDimensions: Equatable, Hashable, Sendable {
     public let width: Int
     public let height: Int
 
@@ -53,19 +53,52 @@ public struct VideoDimensions: Equatable, Sendable {
     public static let h1080_169 = VideoDimensions(width: 1920, height: 1080)
 }
 
+/// Предпочтительный видео-кодек. Финальный кодек определяет SFU
+/// на основе `enabled_codecs` в конфиге LiveKit + возможностей клиентов.
+/// Если предпочтение не поддерживается — SFU выберет из доступных.
+public enum VideoCodec: String, CaseIterable, Sendable {
+    /// Hardware-accelerated на iOS (VideoToolbox), лучшая совместимость. Дефолт.
+    case h264
+    /// Software-encoded, широкая браузерная поддержка, хуже сжатие чем VP9/AV1.
+    case vp8
+    /// Software-encoded на iOS, ~30% лучше VP8 по битрейту при том же качестве.
+    /// Chrome/Firefox/Safari 14+, Edge — везде декодируется.
+    case vp9
+    /// Software-encoded, ~50% лучше H264. Дорогой по CPU/батарее, hardware-encode
+    /// на iOS нет. Декодинг: Chrome, Edge, Firefox 100+; Safari частично.
+    case av1
+
+    public var displayName: String {
+        switch self {
+        case .h264: return "H.264"
+        case .vp8:  return "VP8"
+        case .vp9:  return "VP9"
+        case .av1:  return "AV1"
+        }
+    }
+}
+
 /// Параметры screen-share публикации.
-public struct ScreenShareOptions: Sendable {
+public struct ScreenShareOptions: Sendable, Equatable {
     public var dimensions: VideoDimensions
     public var fps: Int
+    public var codec: VideoCodec
+    /// Верхняя граница битрейта в kbps. nil = LiveKit сам решает (адаптивно).
+    /// Типичные значения: 500 kbps (SD/тонкая сеть), 1500 kbps (HD), 3500 kbps (FHD).
+    public var maxBitrateKbps: Int?
     /// false = ReplayKit RPScreenRecorder (только это приложение, P0)
     /// true  = Broadcast Extension (весь экран устройства, P2)
     public var useBroadcastExtension: Bool
 
     public init(dimensions: VideoDimensions = .h720_169,
                 fps: Int = 15,
+                codec: VideoCodec = .h264,
+                maxBitrateKbps: Int? = 1500,
                 useBroadcastExtension: Bool = false) {
         self.dimensions = dimensions
         self.fps = fps
+        self.codec = codec
+        self.maxBitrateKbps = maxBitrateKbps
         self.useBroadcastExtension = useBroadcastExtension
     }
 }
@@ -157,6 +190,13 @@ public protocol CobrowseTransport: AnyObject {
     /// Для in-app (P0) — под капотом ReplayKit RPScreenRecorder.
     /// Для full device (P2) — Broadcast Extension через App Group.
     func publishScreenShare(options: ScreenShareOptions) async throws
+
+    /// Заменить активную screen-share публикацию с новыми параметрами.
+    /// LiveKit не умеет hot-swap кодек/битрейт — под капотом unpublish + publish.
+    /// Пользователь увидит короткий чёрный кадр (< 1с), сессия не рвётся.
+    ///
+    /// Если публикации нет — ведёт себя как обычный publishScreenShare.
+    func republishScreenShare(options: ScreenShareOptions) async throws
 
     /// Публикация микрофона.
     func publishAudio(options: AudioOptions) async throws

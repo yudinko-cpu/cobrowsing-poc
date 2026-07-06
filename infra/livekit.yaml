@@ -70,6 +70,8 @@ room:
   empty_timeout: 300        # удалить пустую комнату через 5 мин
   max_participants: 5       # клиент + до 4 агентов
   enabled_codecs:
-    - mime: video/H264      # H264 — лучшая совместимость с iOS hardware encoder
-    - mime: video/VP8       # fallback
+    - mime: video/H264      # HW-encode на iOS, дефолт
+    - mime: video/VP8       # software, широкая совместимость
+    - mime: video/VP9       # ~30% лучше VP8, software на iOS
+    - mime: video/AV1       # ~50% лучше H264, дорого по CPU, декодинг ограничен
     - mime: audio/opus

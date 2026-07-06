@@ -85,11 +85,48 @@ public final class LiveKitTransport: CobrowseTransport {
             )
         )
         do {
-            try await room.localParticipant.publish(videoTrack: track)
+            try await room.localParticipant.publish(
+                videoTrack: track,
+                options: buildVideoPublishOptions(from: options)
+            )
             screenTrack = track
         } catch {
             throw TransportError.publishFailed(error.localizedDescription)
         }
+    }
+
+    public func republishScreenShare(options: ScreenShareOptions) async throws {
+        guard connectionState == .connected else { throw TransportError.notConnected }
+
+        // Снимаем текущую публикацию (если есть) — LiveKit не умеет hot-swap
+        // preferredCodec/encoding, поэтому только через unpublish+publish.
+        if let s = screenTrack {
+            if let pub = room.localParticipant.localVideoTracks.first(where: { $0.track === s }) {
+                try? await room.localParticipant.unpublish(publication: pub)
+            }
+            screenTrack = nil
+        }
+        try await publishScreenShare(options: options)
+    }
+
+    /// Маппинг нейтральных ScreenShareOptions → LiveKit VideoPublishOptions.
+    /// preferredCodec — гарантия best-effort, финальный кодек определяет SFU
+    /// на основе enabled_codecs в livekit.yaml.
+    private func buildVideoPublishOptions(from options: ScreenShareOptions) -> VideoPublishOptions {
+        let liveKitCodec: LiveKit.VideoCodec = switch options.codec {
+        case .h264: .h264
+        case .vp8:  .vp8
+        case .vp9:  .vp9
+        case .av1:  .av1
+        }
+        let encoding: VideoEncoding? = options.maxBitrateKbps.map { kbps in
+            VideoEncoding(maxBitrate: kbps * 1000, maxFps: options.fps)
+        }
+        return VideoPublishOptions(
+            name: Track.screenShareVideoName,
+            screenShareEncoding: encoding,
+            preferredCodec: liveKitCodec
+        )
     }
 
     public func publishAudio(options: AudioOptions) async throws {

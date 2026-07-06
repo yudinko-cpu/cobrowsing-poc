@@ -56,6 +56,12 @@ public final class CobrowseClient: ObservableObject {
 
     @Published public private(set) var state: State = .idle
 
+    /// Текущие параметры screen-share публикации. Меняются в UI через
+    /// `updateScreenShareOptions`. `startSession` использует именно их —
+    /// пре-конфиг до старта или live-обновление во время .streaming.
+    @Published public private(set) var screenShareOptions: ScreenShareOptions =
+        ScreenShareOptions()
+
     /// Код, который клиент показывает и диктует оператору.
     /// Доступен во время .streaming и .reconnecting (в реконнекте код тот же).
     public var sessionCode: String? {
@@ -142,17 +148,15 @@ public final class CobrowseClient: ObservableObject {
             throw error
         }
 
-        // 4. Опубликовать экран. Микрофон в PoC не публикуем — консент-диалог
-        //    отвлекает и мешает демо, разговор идёт через отдельный канал (звонок).
-        //    Голос может вернуть web-agent → клиент, оператор говорит через MicToggle;
-        //    вернуть публикацию с клиента — раскомментить publishAudio ниже +
-        //    вернуть NSMicrophoneUsageDescription в Info.plist.
+        // 4. Опубликовать экран. Параметры берём из screenShareOptions —
+        //    UI может их пре-конфигурить перед стартом или менять live
+        //    через updateScreenShareOptions().
+        //    Микрофон в PoC не публикуем — консент-диалог отвлекает и мешает
+        //    демо, разговор идёт через отдельный канал (звонок). Вернуть
+        //    публикацию с клиента — раскомментить publishAudio ниже + вернуть
+        //    NSMicrophoneUsageDescription в Info.plist.
         do {
-            try await transport.publishScreenShare(options: ScreenShareOptions(
-                dimensions: .h720_169,
-                fps: 15,
-                useBroadcastExtension: false
-            ))
+            try await transport.publishScreenShare(options: screenShareOptions)
             // try await transport.publishAudio(options: AudioOptions(
             //     echoCancellation: true,
             //     noiseSuppression: true
@@ -165,6 +169,39 @@ public final class CobrowseClient: ObservableObject {
 
         state = .streaming(code: session.code)
         return session.code
+    }
+
+    /// Обновить параметры screen-share.
+    ///
+    /// - Если сессия НЕ активна — просто сохраняет для будущего startSession.
+    /// - Если сессия .streaming — вызывает transport.republishScreenShare,
+    ///   что под капотом делает unpublish + publish (короткий чёрный кадр < 1с,
+    ///   сессия не рвётся). Оператор видит короткий blip.
+    /// - В .reconnecting/.connecting/.requestingConsent — кидает `.notStreaming`,
+    ///   т.к. нет живого трека для замены; пусть UI подождёт .streaming.
+    ///
+    /// Атомарность: если republish бросил — сохраняем новые options всё равно
+    /// (следующий рестарт возьмёт их). Не хотим тихо откатывать пользовательский
+    /// выбор из-за одной сетевой ошибки.
+    public func updateScreenShareOptions(_ new: ScreenShareOptions) async throws {
+        let previous = screenShareOptions
+        screenShareOptions = new
+
+        switch state {
+        case .idle, .ended, .error:
+            return  // просто запомнили, применится на следующий startSession
+        case .streaming:
+            do {
+                try await transport.republishScreenShare(options: new)
+            } catch {
+                // Оставляем `new` в screenShareOptions — юзер видит своё значение
+                // в UI. Rethrow, чтобы вызывающий мог показать error toast.
+                _ = previous
+                throw error
+            }
+        case .requestingConsent, .connecting, .reconnecting:
+            throw CobrowseError.notStreaming
+        }
     }
 
     /// Остановить сессию по инициативе клиента.
@@ -319,12 +356,14 @@ extension CobrowseClient: CobrowseTransportDelegate {
 public enum CobrowseError: LocalizedError {
     case consentDenied
     case alreadyActive
+    case notStreaming
     case backendError(statusCode: Int)
 
     public var errorDescription: String? {
         switch self {
         case .consentDenied:          return "Пользователь не дал согласие на запись экрана"
         case .alreadyActive:          return "Сессия уже активна"
+        case .notStreaming:           return "Сессия не в состоянии streaming — параметры сохранены, применятся при следующем старте"
         case .backendError(let code): return "Сервер вернул ошибку \(code)"
         }
     }
