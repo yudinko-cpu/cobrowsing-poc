@@ -4,11 +4,15 @@
 # Caddy сам поднимает ACME challenge на :80 и получает сертификаты для всех
 # трёх доменов. DNS A-записи должны быть настроены ДО первого старта, иначе
 # challenge не пройдёт и в логах будет цикл retry.
+#
+# Caddy в host mode → апстримы адресуются через localhost:
+#   - LiveKit (host mode) — localhost:7880
+#   - backend (bridge, published) — 127.0.0.1:4000
+#   - web-agent (bridge, published) — 127.0.0.1:3000
 
 # LiveKit WebSocket signaling.
-# Host mode для LiveKit → доступен как host.docker.internal:7880 из bridge-сети Caddy.
 {$DOMAIN} {
-    reverse_proxy host.docker.internal:7880
+    reverse_proxy localhost:7880
 
     log {
         output file /data/livekit-access.log
@@ -16,9 +20,9 @@
     }
 }
 
-# Token API (backend в bridge-сети compose — доступен по service name).
+# Token API.
 {$API_DOMAIN} {
-    reverse_proxy backend:4000
+    reverse_proxy localhost:4000
 
     log {
         output file /data/api-access.log
@@ -26,9 +30,9 @@
     }
 }
 
-# Web-agent (Next.js SSR — не статика, поэтому reverse_proxy, не file_server).
+# Web-agent (Next.js SSR — reverse_proxy, не file_server).
 {$AGENT_DOMAIN} {
-    reverse_proxy web-agent:3000
+    reverse_proxy localhost:3000
 
     log {
         output file /data/agent-access.log

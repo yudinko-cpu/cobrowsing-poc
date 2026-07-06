@@ -91,20 +91,23 @@ services:
   web-agent:
     image: ghcr.io/${GHCR_OWNER}/cobrowsing-poc-web-agent:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    ports:
+      # Локальный bind — нужен для Caddy (host mode) чтобы дотянуться
+      # через 127.0.0.1:3000. Наружу не публикуется.
+      - "127.0.0.1:3000:3000"
     environment:
       NODE_ENV: production
     depends_on:
       - backend
 
   # Caddy — TLS termination + reverse proxy.
-  # Bridge network: 80/443 наружу, до backend/web-agent — по service name,
-  # до LiveKit (host mode) — через host.docker.internal:7880.
+  # Host mode: все апстримы (LiveKit host-mode + backend/web-agent на
+  # 127.0.0.1) доступны через localhost. Обходит проблему cross-bridge
+  # FORWARD-DROP на Ubuntu с включённым ufw.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    network_mode: host
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -113,8 +116,6 @@ services:
       DOMAIN: ${DOMAIN}
       API_DOMAIN: ${API_DOMAIN}
       AGENT_DOMAIN: ${AGENT_DOMAIN}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
       - web-agent
