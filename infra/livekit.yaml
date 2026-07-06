@@ -22,9 +22,9 @@ redis:
 # Сгенерировать: openssl rand -hex 16 для key, openssl rand -base64 32 для secret.
 # ВАЖНО: secret должен быть длиной не менее 32 символов.
 keys:
-  # Подставляется через envsubst при деплое (см. infra/README.md)
-  # Для запуска без envsubst — заменить вручную.
-  APIxxxxxxxxxxxx: secret_at_least_32_chars_replace_me_with_real_secret_please
+  # Подставляется envsubst на VPS в GHA-workflow (см. deploy.yml, шаг
+  # "Render livekit.yaml"). Локально для standalone-запуска — заменить руками.
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
 
 # TURN — отключён для POC.
 #

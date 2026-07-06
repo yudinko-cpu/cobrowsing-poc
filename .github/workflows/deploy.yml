@@ -129,16 +129,26 @@ jobs:
               echo "IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}" >> infra/.env
             fi
 
-            # 3) Логин в GHCR (образы приватные — если публичные, шаг можно убрать).
+            # 3) Рендерим livekit.yaml — подставляем LiveKit ключи из .env.
+            #    Раньше это был ручной sed после clone, но git reset --hard в шаге 1
+            #    затирал результат каждый деплой → 401 Invalid API key.
+            cd infra
+            set -a; source .env; set +a
+            sed -i \
+              -e "s|\${LIVEKIT_API_KEY}|${LIVEKIT_API_KEY}|g" \
+              -e "s|\${LIVEKIT_API_SECRET}|${LIVEKIT_API_SECRET}|g" \
+              livekit.yaml
+            grep -A1 '^keys:' livekit.yaml   # sanity check в логах деплоя
+
+            # 4) Логин в GHCR (образы приватные — если публичные, шаг можно убрать).
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
               -u ${{ github.actor }} --password-stdin
 
-            # 4) Pull новых образов + rolling restart.
-            cd infra
+            # 5) Pull новых образов + rolling restart.
             docker compose --env-file .env pull backend web-agent
             docker compose --env-file .env up -d --remove-orphans
 
-            # 5) Smoke-check: token-server /health должен ответить 200 в течение 60с.
+            # 6) Smoke-check: token-server /health должен ответить 200 в течение 60с.
             for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
                 echo "backend healthy"
