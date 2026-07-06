@@ -24,6 +24,9 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN test -n "$NEXT_PUBLIC_API_URL" || (echo "NEXT_PUBLIC_API_URL build-arg required" && exit 1)
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Next.js не требует public/, но runner COPY --from=builder /app/public
+# упадёт без неё. Гарантируем — пустая папка бесплатна.
+RUN mkdir -p /app/public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
