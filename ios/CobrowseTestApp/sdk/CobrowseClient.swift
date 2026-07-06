@@ -142,17 +142,21 @@ public final class CobrowseClient: ObservableObject {
             throw error
         }
 
-        // 4. Опубликовать экран + микрофон
+        // 4. Опубликовать экран. Микрофон в PoC не публикуем — консент-диалог
+        //    отвлекает и мешает демо, разговор идёт через отдельный канал (звонок).
+        //    Голос может вернуть web-agent → клиент, оператор говорит через MicToggle;
+        //    вернуть публикацию с клиента — раскомментить publishAudio ниже +
+        //    вернуть NSMicrophoneUsageDescription в Info.plist.
         do {
             try await transport.publishScreenShare(options: ScreenShareOptions(
                 dimensions: .h720_169,
                 fps: 15,
                 useBroadcastExtension: false
             ))
-            try await transport.publishAudio(options: AudioOptions(
-                echoCancellation: true,
-                noiseSuppression: true
-            ))
+            // try await transport.publishAudio(options: AudioOptions(
+            //     echoCancellation: true,
+            //     noiseSuppression: true
+            // ))
         } catch {
             await transport.disconnect()
             state = .error("Не удалось запустить захват экрана: \(error.localizedDescription)")

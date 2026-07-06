@@ -5,10 +5,12 @@
   автоматически. Нужно либо править сгенерированный, либо добавлять ключи
   через "Target → Info" вкладку.
 
-  Все три ключа обязательны для dev-сборки:
+  Обязательные ключи:
     1. NSAppTransportSecurity — разрешает ws:// на localhost
-    2. NSMicrophoneUsageDescription — LiveKit публикует audio track
-    3. NSCameraUsageDescription — на будущее (P2 mobile camera share)
+    2. NSCameraUsageDescription — на будущее (P2 mobile camera share)
+
+  NSMicrophoneUsageDescription убран: в PoC клиент не публикует audio track
+  (см. CobrowseClient.startSession). Вернуть при реактивации publishAudio.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -52,9 +54,6 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
-
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Для голосовой связи с оператором поддержки</string>
 
     <key>NSCameraUsageDescription</key>
     <string>Опционально: показать камеру оператору при диагностике устройства</string>
