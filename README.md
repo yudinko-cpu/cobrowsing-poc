@@ -7,7 +7,11 @@ Self-hosted video-streaming cobrowsing для iOS-приложений.
 ```
 cobrowsing-poc/
 ├── docs/
-│   ├── architecture.md             # Архитектура + диаграммы
+│   ├── architecture.md             # Архитектурный обзор + C4 (Context, Container)
+│   ├── test-stand.md               # Тестовый стенд: Hetzner + Cloudflare + CI/CD
+│   ├── security.md                 # Меры защиты, модель угроз, данные и приватность
+│   ├── deployment.md               # VPS bootstrap + CI/CD чек-лист
+│   ├── HANDOFF.md                  # Брифинг для новой сессии разработки
 │   └── p0-acceptance-criteria.md   # Тикеты для P0
 ├── infra/                          # Self-hosted LiveKit deployment
 │   ├── docker-compose.yml          # Prod: Caddy + Let's Encrypt + реальные домены
