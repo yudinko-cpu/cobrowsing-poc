@@ -36,27 +36,33 @@ healthcare).
 ## 3. C4 Level 1 — System Context
 
 ```mermaid
-C4Context
-    title Cobrowsing PoC — System Context
+flowchart TB
+    customer["Клиент<br/>[Person]<br/><i>Пользователь iOS-приложения,<br/>которому нужна помощь</i>"]
+    agent["Оператор поддержки<br/>[Person]<br/><i>Помогает клиенту,<br/>видя его экран</i>"]
 
-    Person(customer, "Клиент", "Пользователь iOS-приложения, которому нужна помощь")
-    Person(agent, "Оператор поддержки", "Помогает клиенту, видя его экран")
+    cobrowse["Cobrowsing-система<br/>[Software System]<br/><i>Стриминг экрана iOS-приложения оператору<br/>в реальном времени. Self-hosted:<br/>LiveKit SFU + token-server + web-дашборд</i>"]
 
-    System(cobrowse, "Cobrowsing-система", "Стриминг экрана iOS-приложения оператору в реальном времени. Self-hosted: LiveKit SFU + token-server + web-дашборд")
+    hostapp["iOS-приложение компании<br/>[External System]<br/><i>Приложение, в которое<br/>встроен Cobrowse SDK</i>"]
+    phone["Телефонный канал<br/>[External System]<br/><i>Существующая линия поддержки —<br/>клиент диктует код сессии</i>"]
+    le["Let's Encrypt<br/>[External System]<br/><i>Автоматическая выдача<br/>TLS-сертификатов (ACME)</i>"]
 
-    System_Ext(hostapp, "iOS-приложение компании", "Приложение, в которое встроен Cobrowse SDK")
-    System_Ext(phone, "Телефонный канал", "Существующая линия поддержки — клиент диктует код сессии")
-    System_Ext(le, "Let's Encrypt", "Автоматическая выдача TLS-сертификатов (ACME)")
+    customer -- "Использует, даёт согласие<br/>на шаринг экрана" --> hostapp
+    hostapp -- "Публикует видеопоток экрана, звук<br/>[HTTPS + WebRTC]" --> cobrowse
+    agent -- "Смотрит экран клиента,<br/>говорит с ним<br/>[HTTPS + WebRTC]" --> cobrowse
+    customer -. "Диктует код сессии" .-> phone
+    phone -. "Передаёт код" .-> agent
+    cobrowse -- "Получает и продлевает сертификаты<br/>[ACME / HTTP-01]" --> le
 
-    Rel(customer, hostapp, "Использует, даёт согласие на шаринг экрана")
-    Rel(hostapp, cobrowse, "Публикует видеопоток экрана, звук", "HTTPS + WebRTC")
-    Rel(agent, cobrowse, "Смотрит экран клиента, говорит с ним", "HTTPS + WebRTC")
-    Rel(customer, phone, "Диктует код сессии")
-    Rel(phone, agent, "Передаёт код")
-    Rel(cobrowse, le, "Получает и продлевает сертификаты", "ACME / HTTP-01")
-
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+    classDef person fill:#08427b,stroke:#052e56,color:#fff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#fff
+    classDef ext fill:#999999,stroke:#6b6b6b,color:#fff
+    class customer,agent person
+    class cobrowse system
+    class hostapp,phone,le ext
 ```
+
+Легенда (C4 Level 1): синие тёмные блоки — люди, синий — описываемая система,
+серые — внешние системы; пунктир — внеполосный канал.
 
 Границы системы: cobrowsing-система не имеет собственной пользовательской базы
 и аутентификации клиентов — она встраивается в существующее приложение и
@@ -66,48 +72,57 @@ C4Context
 ## 4. C4 Level 2 — Container
 
 ```mermaid
-C4Container
-    title Cobrowsing PoC — Containers
+flowchart TB
+    customer["Клиент<br/>[Person]"]
+    agent["Оператор<br/>[Person]"]
 
-    Person(customer, "Клиент", "Пользователь iOS-приложения")
-    Person(agent, "Оператор", "Сотрудник поддержки")
+    subgraph ios["iOS-приложение клиента"]
+        sdk["Cobrowse SDK<br/>[Swift, ReplayKit, LiveKit iOS SDK]<br/><i>Consent-prompt, захват экрана (in-app),<br/>state machine сессии,<br/>публикация WebRTC-трека</i>"]
+    end
 
-    Container_Boundary(ios, "iOS-приложение клиента") {
-        Container(sdk, "Cobrowse SDK", "Swift, ReplayKit, LiveKit iOS SDK", "Consent-prompt, захват экрана (in-app), state machine сессии, публикация WebRTC-трека")
-    }
+    subgraph vps["Self-hosted сервер (1 VPS, публичный IP)"]
+        caddy["Caddy<br/>[Caddy 2, host network]<br/><i>TLS-терминация и reverse proxy<br/>для трёх доменов, авто-Let's Encrypt</i>"]
+        token["Token-server<br/>[Node.js, Express, :4000]<br/><i>Создание сессий, генерация кодов,<br/>выдача JWT, завершение комнат</i>"]
+        livekit["LiveKit SFU<br/>[Go, host network, WS :7880,<br/>UDP 50000-60000, TCP fallback :7881]<br/><i>WebRTC signaling и маршрутизация<br/>медиа (видео, звук, data)</i>"]
+        webagent["Web-agent<br/>[Next.js SSR, :3000]<br/><i>Дашборд оператора: ввод кода,<br/>список сессий, viewer с HUD</i>"]
+        redis[("Redis<br/>[Redis 7, только 127.0.0.1]<br/><i>Mapping код→комната (TTL 10 мин),<br/>state сессий (TTL 1 ч),<br/>room state LiveKit</i>")]
+    end
 
-    Container_Boundary(vps, "Self-hosted сервер (1 VPS, публичный IP)") {
-        Container(caddy, "Caddy", "Caddy 2, host network", "TLS-терминация и reverse proxy для трёх доменов, авто-Let's Encrypt")
-        Container(token, "Token-server", "Node.js, Express, :4000", "Создание сессий, генерация кодов, выдача JWT, завершение комнат")
-        Container(livekit, "LiveKit SFU", "Go, host network, WS :7880, UDP 50000-60000, TCP fallback :7881", "WebRTC signaling и маршрутизация медиа (видео, звук, data)")
-        Container(webagent, "Web-agent", "Next.js SSR, :3000", "Дашборд оператора: ввод кода, список сессий, viewer с диагностическим HUD")
-        ContainerDb(redis, "Redis", "Redis 7, только 127.0.0.1", "Mapping код→комната (TTL 10 мин), state сессий (TTL 1 ч), room state LiveKit")
-    }
+    subgraph browser["Браузер оператора"]
+        viewer["Agent Viewer<br/>[React, LiveKit JS SDK]<br/><i>Подписка на видеопоток, mic toggle,<br/>диагностика соединения</i>"]
+    end
 
-    Container_Boundary(browser, "Браузер оператора") {
-        Container(viewer, "Agent Viewer", "React, LiveKit JS SDK", "Подписка на видеопоток, mic toggle, диагностика соединения")
-    }
+    customer -- "Запускает сессию,<br/>подтверждает согласие" --> sdk
+    agent -- "Вводит код,<br/>смотрит экран" --> viewer
 
-    Rel(customer, sdk, "Запускает сессию, подтверждает согласие")
-    Rel(agent, viewer, "Вводит код, смотрит экран")
+    sdk -- "POST /session/create<br/>[HTTPS]" --> caddy
+    viewer -- "POST /agent/join, /session/list<br/>[HTTPS]" --> caddy
+    agent -- "Открывает дашборд<br/>[HTTPS]" --> caddy
 
-    Rel(sdk, caddy, "POST /session/create", "HTTPS")
-    Rel(viewer, caddy, "POST /agent/join, /session/list", "HTTPS")
-    Rel(agent, caddy, "Открывает дашборд", "HTTPS")
+    caddy -- "api.* → :4000<br/>[HTTP, localhost]" --> token
+    caddy -- "agent.* → :3000<br/>[HTTP, localhost]" --> webagent
+    caddy -- "livekit.* → :7880<br/>[WS upgrade, localhost]" --> livekit
 
-    Rel(caddy, token, "api.* → :4000", "HTTP, localhost")
-    Rel(caddy, webagent, "agent.* → :3000", "HTTP, localhost")
-    Rel(caddy, livekit, "livekit.* → :7880", "WS upgrade, localhost")
+    token -- "Коды, сессии<br/>[RESP]" --> redis
+    token -- "deleteRoom (RoomServiceClient)<br/>[HTTP :7880]" --> livekit
+    livekit -- "Room state<br/>[RESP, 127.0.0.1]" --> redis
 
-    Rel(token, redis, "Коды, сессии", "RESP")
-    Rel(token, livekit, "deleteRoom (RoomServiceClient)", "HTTP :7880")
-    Rel(livekit, redis, "Room state", "RESP, 127.0.0.1")
+    sdk <== "Медиа: видео + звук + data<br/>[WebRTC/SRTP, UDP 50000-60000<br/>или TCP 7881]" ==> livekit
+    viewer <== "Медиа<br/>[WebRTC/SRTP]" ==> livekit
 
-    BiRel(sdk, livekit, "Медиа: видео + звук + data", "WebRTC/SRTP, UDP 50000-60000 или TCP 7881")
-    BiRel(viewer, livekit, "Медиа", "WebRTC/SRTP")
-
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+    classDef person fill:#08427b,stroke:#052e56,color:#fff
+    classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+    classDef db fill:#438dd5,stroke:#2e6295,color:#fff
+    classDef boundary fill:none,stroke:#444,stroke-dasharray:5 5
+    class customer,agent person
+    class sdk,caddy,token,livekit,webagent,viewer container
+    class redis db
+    class ios,vps,browser boundary
 ```
+
+Легенда (C4 Level 2): рамки-пунктиры — границы исполнения (устройство клиента,
+VPS, браузер оператора), голубые блоки — контейнеры, цилиндр — хранилище;
+жирные стрелки — медиапоток WebRTC, обычные — HTTP/WS.
 
 Замечания к диаграмме:
 
