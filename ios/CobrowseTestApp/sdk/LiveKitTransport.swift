@@ -140,10 +140,17 @@ public final class LiveKitTransport: CobrowseTransport {
     /// preferredCodec — best-effort, финальный кодек определяет SFU
     /// на основе enabled_codecs в livekit.yaml.
     ///
-    /// simulcast: false — разрешение уже зафиксировано на входе
-    /// (ScaledScreenShareCapturer даунскейлит CVPixelBuffer до целевого).
-    /// Simulcast с single-layer и layers-пресеты SDK не помогли обуздать
-    /// screen share dimensions — теперь мы сами сжимаем перед encoder'ом.
+    /// simulcast: true — ВОССТАНАВЛИВАЕТ адаптацию под плохую сеть. SFU держит
+    /// несколько слоёв качества и переключает каждого подписчика вниз по его
+    /// downlink-оценке пропускной способности. С single-layer (simulcast: false)
+    /// переключать было не на что — поток у получателя со слабой сетью фризился
+    /// вместо деградации качества.
+    ///   • H.264/VP8 → классический simulcast; нижние слои encoder получает через
+    ///     scaleResolutionDownBy от нашего уже-даунскейленного буфера.
+    ///   • VP9/AV1   → LiveKit сам включает SVC (L3T3_KEY) вместо simulcast.
+    /// Верхнее разрешение по-прежнему фиксирует ScaledScreenShareCapturer —
+    /// simulcast добавляет только слои НИЖЕ него, поэтому старая проблема с
+    /// обузданием screen-share dimensions на базовом слое здесь не всплывает.
     private func buildVideoPublishOptions(from options: ScreenShareOptions) -> VideoPublishOptions {
         let liveKitCodec: LiveKit.VideoCodec = switch options.codec {
         case .h264: .h264
@@ -151,15 +158,21 @@ public final class LiveKitTransport: CobrowseTransport {
         case .vp9:  .vp9
         case .av1:  .av1
         }
-        let encoding = VideoEncoding(
-            maxBitrate: (options.maxBitrateKbps ?? 500) * 1000,
-            maxFps: options.fps
-        )
+
+        // nil битрейт = отдаём управление BWE/LiveKit (адаптивно), как и обещано
+        // в доке ScreenShareOptions.maxBitrateKbps. Прежний `?? 500` молча
+        // перебивал этот путь фиксированным полом 500 kbps и ломал адаптацию.
+        let encoding: VideoEncoding? = options.maxBitrateKbps.map { kbps in
+            VideoEncoding(maxBitrate: kbps * 1000, maxFps: options.fps)
+        }
+
         return VideoPublishOptions(
             name: Track.screenShareVideoName,
             screenShareEncoding: encoding,
-            simulcast: false,
-            preferredCodec: liveKitCodec
+            simulcast: true,
+            preferredCodec: liveKitCodec,
+            // Screen share = текст/UI: под конгестией жертвуем FPS, бережём чёткость.
+            degradationPreference: .maintainResolution
         )
     }
 
