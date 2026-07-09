@@ -78,17 +78,11 @@ export default function SessionPage({ params }: { params: { code: string } }) {
     })();
   }, [params.code]);
 
-  const handleEnd = async () => {
-    if (roomName) {
-      try {
-        await apiFetch('/session/end', {
-          method: 'POST',
-          body: JSON.stringify({ roomName }),
-        });
-      } catch {
-        // ignore — всё равно уходим на главную
-      }
-    }
+  // Co-viewing: агент может только ПОКИНУТЬ сессию, не завершая её для других.
+  // Просто уходим на главную — LiveKitRoom при размонтировании сам делает
+  // room.disconnect(), клиент и остальные агенты продолжают работу.
+  // Комнату закрывает клиент (iOS → /session/end) или TTL / empty_timeout.
+  const handleLeave = () => {
     router.push('/');
   };
 
@@ -140,7 +134,7 @@ export default function SessionPage({ params }: { params: { code: string } }) {
         setError(`LiveKit: ${err.message}`);
       }}
     >
-      <SessionView code={params.code} roomName={roomName} serverUrl={serverUrl} onEnd={handleEnd} />
+      <SessionView code={params.code} roomName={roomName} serverUrl={serverUrl} onLeave={handleLeave} />
       <RoomAudioRenderer />
     </LiveKitRoom>
   );
@@ -150,12 +144,12 @@ function SessionView({
   code,
   roomName,
   serverUrl,
-  onEnd,
+  onLeave,
 }: {
   code: string;
   roomName?: string;
   serverUrl?: string;
-  onEnd: () => void;
+  onLeave: () => void;
 }) {
   const remoteParticipants = useRemoteParticipants();
   const connectionState = useConnectionState();
@@ -220,17 +214,43 @@ function SessionView({
   // checking/failed и никогда не выйти в connected.
   const iceState = usePeerConnectionState();
 
+  // Классификация участников по name (проставляется backend'ом в токене:
+  // клиент = 'Customer', агент = 'Agent'). Клиент — тот, кто шарит экран.
+  // Остальные агенты в комнате — коллеги-операторы (co-viewing).
+  const { localParticipant } = useLocalParticipant();
+  const customerPresent = remoteParticipants.some((p) => p.name === 'Customer');
+  // Ростер агентов: локальный (мы) + удалённые агенты. Дедуп по identity на
+  // случай, если local почему-то отразился и в remote-списке.
+  const agentRoster = useMemo(() => {
+    const remoteAgents = remoteParticipants.filter((p) => p.name === 'Agent');
+    const seen = new Set<string>();
+    const list: Array<{ identity: string; isLocal: boolean }> = [];
+    if (localParticipant) {
+      list.push({ identity: localParticipant.identity, isLocal: true });
+      seen.add(localParticipant.identity);
+    }
+    for (const p of remoteAgents) {
+      if (seen.has(p.identity)) continue;
+      seen.add(p.identity);
+      list.push({ identity: p.identity, isLocal: false });
+    }
+    return list;
+  }, [remoteParticipants, localParticipant]);
+
   return (
     <div style={styles.viewer}>
       <InsecureContextBanner />
       <header style={styles.header}>
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
           <strong>Сессия {code.slice(0, 3)}-{code.slice(3)}</strong>
           <span style={styles.liveBadge}>● LIVE</span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <AgentRoster roster={agentRoster} />
           <MicToggle />
-          <button style={styles.endBtn} onClick={onEnd}>Завершить</button>
+          <button style={styles.endBtn} onClick={onLeave} title="Выйти из сессии (для остальных она продолжится)">
+            Покинуть
+          </button>
         </div>
       </header>
 
@@ -258,7 +278,7 @@ function SessionView({
           <VideoTrack trackRef={trackRef} className="cobrowse-video" />
         ) : (
           <WaitingPlaceholder
-            participantCount={remoteParticipants.length}
+            customerPresent={customerPresent}
             videoPublications={videoPublications}
           />
         )}
@@ -282,14 +302,16 @@ function SessionView({
 }
 
 function WaitingPlaceholder({
-  participantCount,
+  customerPresent,
   videoPublications,
 }: {
-  participantCount: number;
+  customerPresent: boolean;
   videoPublications: Array<{ participantIdentity: string; publication: RemoteTrackPublication }>;
 }) {
   // Разные плейсхолдеры для разных стадий — понятнее, где мы застряли.
-  if (participantCount === 0) {
+  // Ориентируемся именно на присутствие КЛИЕНТА, а не на общее число
+  // участников: другие агенты (co-viewing) не должны выглядеть как "клиент".
+  if (!customerPresent) {
     return <div style={styles.waiting}>Клиент ещё не подключился к сессии…</div>;
   }
   if (videoPublications.length === 0) {
@@ -304,6 +326,51 @@ function WaitingPlaceholder({
       <small style={{ color: '#6b7280' }}>
         Проверьте permissions агента и совместимость кодеков.
       </small>
+    </div>
+  );
+}
+
+// MARK: — Agent roster
+
+/**
+ * Ростер и счётчик агентов в сессии (co-viewing). Показывает, кто из
+ * операторов сейчас смотрит один и тот же экран. Данные — из LiveKit
+ * presence (local + remote-участники с name='Agent'), backend не опрашиваем.
+ * Локальный агент помечен «вы».
+ */
+function AgentRoster({ roster }: { roster: Array<{ identity: string; isLocal: boolean }> }) {
+  const [open, setOpen] = useState(false);
+  const count = roster.length;
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title="Агенты, подключённые к сессии"
+        style={{
+          background: '#374151',
+          color: 'white',
+          border: 'none',
+          padding: '8px 12px',
+          borderRadius: 6,
+          cursor: 'pointer',
+          fontWeight: 600,
+          fontSize: 13,
+        }}
+      >
+        👥 Агентов: {count}
+      </button>
+      {open && (
+        <div style={styles.rosterPopover}>
+          {roster.map((a) => (
+            <div key={a.identity} style={styles.rosterItem}>
+              <span style={styles.rosterDot} />
+              <span style={{ fontFamily: 'ui-monospace, monospace' }}>{a.identity}</span>
+              {a.isLocal && <span style={styles.rosterYou}>вы</span>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -698,6 +765,21 @@ const styles: Record<string, React.CSSProperties> = {
   header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1f2937' },
   liveBadge: { marginLeft: 12, color: '#f87171', fontSize: 12, fontWeight: 700 },
   endBtn: { background: '#dc2626', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 },
+  rosterPopover: {
+    position: 'absolute',
+    top: 'calc(100% + 6px)',
+    right: 0,
+    zIndex: 10,
+    minWidth: 200,
+    background: '#111827',
+    border: '1px solid #374151',
+    borderRadius: 8,
+    padding: 8,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+  },
+  rosterItem: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', fontSize: 13 },
+  rosterDot: { width: 8, height: 8, borderRadius: '50%', background: '#22c55e', flex: '0 0 auto' },
+  rosterYou: { marginLeft: 'auto', fontSize: 11, color: '#93c5fd', fontWeight: 600 },
   // minHeight: 0 — обязательно для flex-item в column-родителе. Без него
   // default min-height: auto = intrinsic content size, и если video внутри
   // хочет быть высоким (portrait iPhone), контейнер разрастается за пределы

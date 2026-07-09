@@ -17,6 +17,7 @@ type Session = {
   status: 'waiting' | 'active' | 'ended';
   startedAt: number;
   agentJoinedAt?: number;
+  agentCount?: number;
 };
 
 export default function AgentDashboard() {
@@ -75,7 +76,10 @@ export default function AgentDashboard() {
       </section>
 
       <section style={styles.card}>
-        <h2 style={styles.cardTitle}>Ожидающие сессии ({sessions.filter(s => s.status === 'waiting').length})</h2>
+        <h2 style={styles.cardTitle}>
+          Сессии — ожидают: {sessions.filter((s) => s.status === 'waiting').length}, активны:{' '}
+          {sessions.filter((s) => s.status === 'active').length}
+        </h2>
         {sessions.length === 0 ? (
           <p style={styles.muted}>Нет активных сессий</p>
         ) : (
@@ -86,16 +90,19 @@ export default function AgentDashboard() {
                   <div style={styles.sessionCode}>{s.code}</div>
                   <div style={styles.muted}>
                     {s.customerId} · {formatAge(s.startedAt)}
+                    {s.status === 'active' && ` · 👥 ${s.agentCount ?? 0}`}
                   </div>
                 </div>
                 <div>
                   <span style={statusBadge(s.status)}>{s.status}</span>
-                  {s.status === 'waiting' && (
+                  {/* Co-viewing: к активной сессии можно присоединиться вторым/третьим
+                      агентом, а не только к ожидающей. */}
+                  {s.status !== 'ended' && (
                     <button
                       style={{ ...styles.primaryBtn, marginLeft: 12 }}
                       onClick={() => handleJoin(s.code.replace('-', ''))}
                     >
-                      Войти
+                      {s.status === 'active' ? 'Присоединиться' : 'Войти'}
                     </button>
                   )}
                 </div>

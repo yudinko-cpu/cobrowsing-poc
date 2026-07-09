@@ -3,14 +3,17 @@
  *
  * Endpoints:
  *   POST /session/create        — клиент (iOS) создаёт сессию, получает код и publisher-токен
- *   POST /agent/join            — агент входит по коду, получает subscriber-токен
+ *   POST /agent/join            — агент входит по коду, получает subscriber-токен.
+ *                                 Несколько агентов могут войти в одну сессию (co-viewing),
+ *                                 до MAX_AGENTS_PER_SESSION.
  *   POST /session/end           — закрытие сессии (любой стороной)
  *   GET  /session/list          — список активных сессий (для dashboard агентов)
  *   GET  /health                — health check
  *
  * Хранилище: Redis. Ключи:
- *   code:{code}                 — { roomName, customerIdentity, createdAt } TTL 10 мин
- *   session:{roomName}          — { code, status, startedAt, endedAt } TTL 1 час
+ *   code:{code}                 — { roomName, customerId, createdAt,
+ *                                   agents: { [agentId]: { joinedAt } } } TTL 10 мин → 1 час
+ *   session:{roomName}          — { code, status, startedAt, endedAt, agentCount } TTL 1 час
  *   sessions:active             — Set активных roomName
  */
 
@@ -49,6 +52,14 @@ const LOG_LEVEL = required('LOG_LEVEL');
 
 const CODE_TTL_SECONDS = 10 * 60;       // 10 минут на ввод кода агентом
 const SESSION_TTL_SECONDS = 60 * 60;    // 1 час максимальная длительность
+
+// Сколько агентов одновременно пускаем в одну сессию.
+// Демо-фича «co-viewing»: несколько операторов смотрят один экран клиента.
+// Верхняя граница нужна, чтобы (а) случайно не переполнить комнату,
+// (б) держаться в пределах LiveKit room.max_participants (см. infra/livekit*.yaml:
+// max_participants=10 = 1 клиент + до 8 агентов + запас на reconnect-гонки).
+// Reclaim тем же agentId (F5, StrictMode) НЕ считается новым агентом.
+const MAX_AGENTS_PER_SESSION = 8;
 
 function required(name) {
   const v = process.env[name];
@@ -144,18 +155,19 @@ app.post('/session/create', async (req, res) => {
     const roomName = `cobrowse-${crypto.randomUUID()}`;
     const code = generateCode();
 
-    // Сохраняем mapping code → room в Redis с TTL
+    // Сохраняем mapping code → room в Redis с TTL.
+    // agents: {} — пустой набор подключившихся агентов, наполняется в /agent/join.
     await redis.setex(
       `code:${code}`,
       CODE_TTL_SECONDS,
-      JSON.stringify({ roomName, customerId, createdAt: Date.now() })
+      JSON.stringify({ roomName, customerId, createdAt: Date.now(), agents: {} })
     );
 
     // Сохраняем сессию для dashboard
     await redis.setex(
       `session:${roomName}`,
       SESSION_TTL_SECONDS,
-      JSON.stringify({ code, customerId, status: 'waiting', startedAt: Date.now() })
+      JSON.stringify({ code, customerId, status: 'waiting', startedAt: Date.now(), agentCount: 0 })
     );
     await redis.sadd('sessions:active', roomName);
 
@@ -191,15 +203,19 @@ app.post('/session/create', async (req, res) => {
 /**
  * Агент входит в сессию по 6-значному коду.
  * Request:  { code: string, agentId: string }
- * Response: { roomName, livekitUrl, token, customerId }
+ * Response: { roomName, livekitUrl, token, customerId, agentCount }
  *
- * Идемпотентен по (code, agentId):
- * - Первый claim — записываем claimedByAgentId в code:{code}, продлеваем TTL
- *   до длительности сессии, отдаём токен.
- * - Повторный claim с тем же agentId — переизлучаем токен (та же identity,
- *   LiveKit валидно "заменит" участника). Нужно для React StrictMode
- *   double-invoke, F5 в браузере, ретраев по сети.
- * - Claim с ДРУГИМ agentId — 409, код уже занят.
+ * Co-viewing: в одну сессию могут войти несколько агентов (до
+ * MAX_AGENTS_PER_SESSION). Набор агентов хранится в code:{code}.agents —
+ * map agentId → { joinedAt }. LiveKit сам разруливает много подписчиков в
+ * комнате; identity участника = agentId, поэтому агенты должны иметь разные
+ * agentId (их генерит фронт per-tab, см. web-agent getOrCreateAgentId).
+ *
+ * Идемпотентно по (code, agentId):
+ * - Новый agentId — добавляем в agents, если не превышен лимит; иначе 409 (full).
+ * - Повторный вход с тем же agentId — reclaim: переизлучаем токен (та же
+ *   identity, LiveKit валидно "заменит" участника), agents не растёт. Нужно
+ *   для React StrictMode double-invoke, F5 в браузере, ретраев по сети.
  *
  * Код не удаляется, а живёт до конца сессии (SESSION_TTL_SECONDS).
  */
@@ -213,31 +229,43 @@ app.post('/agent/join', async (req, res) => {
     if (!raw) return res.status(404).json({ error: 'code not found or expired' });
 
     const codeEntry = JSON.parse(raw);
-    const { roomName, customerId, claimedByAgentId } = codeEntry;
+    const { roomName, customerId } = codeEntry;
 
-    // Anti-hijack: если код уже claim'нут ДРУГИМ агентом — отказываем.
-    // Одному агенту дозволено переклаймить свой же код сколько угодно раз
-    // (StrictMode, refresh, retry).
-    if (claimedByAgentId && claimedByAgentId !== agentId) {
-      logger.warn(
-        { code, requestedBy: agentId, claimedBy: claimedByAgentId },
-        'agent/join: code already claimed by another agent'
-      );
-      return res.status(409).json({ error: 'code already claimed by another agent' });
+    // Набор агентов. Backward-compat: старые записи могли хранить единственный
+    // claimedByAgentId вместо agents{} — мигрируем на лету.
+    const agents = codeEntry.agents || {};
+    if (codeEntry.claimedByAgentId && !agents[codeEntry.claimedByAgentId]) {
+      agents[codeEntry.claimedByAgentId] = { joinedAt: codeEntry.claimedAt || Date.now() };
+      delete codeEntry.claimedByAgentId;
+      delete codeEntry.claimedAt;
     }
 
-    // Первый claim — фиксируем agentId и продлеваем TTL. Далее — no-op update
-    // (перезапись той же связки), нужен только для reset'а TTL.
-    codeEntry.claimedByAgentId = agentId;
-    codeEntry.claimedAt = codeEntry.claimedAt || Date.now();
+    const isReclaim = Boolean(agents[agentId]);
+
+    // Новый агент — проверяем лимит. Reclaim существующего лимит не трогает.
+    if (!isReclaim) {
+      if (Object.keys(agents).length >= MAX_AGENTS_PER_SESSION) {
+        logger.warn(
+          { code, agentId, current: Object.keys(agents).length, max: MAX_AGENTS_PER_SESSION },
+          'agent/join: session full'
+        );
+        return res.status(409).json({ error: 'session is full' });
+      }
+      agents[agentId] = { joinedAt: Date.now() };
+    }
+
+    codeEntry.agents = agents;
+    // Продлеваем TTL кода до длительности сессии (первый агент "активирует" её).
     await redis.setex(`code:${code}`, SESSION_TTL_SECONDS, JSON.stringify(codeEntry));
 
-    // Обновляем статус сессии
+    const agentCount = Object.keys(agents).length;
+
+    // Обновляем статус сессии для dashboard
     const sessionRaw = await redis.get(`session:${roomName}`);
     if (sessionRaw) {
       const session = JSON.parse(sessionRaw);
       session.status = 'active';
-      session.agentId = agentId;
+      session.agentCount = agentCount;
       session.agentJoinedAt = session.agentJoinedAt || Date.now();
       await redis.setex(`session:${roomName}`, SESSION_TTL_SECONDS, JSON.stringify(session));
     }
@@ -255,14 +283,14 @@ app.post('/agent/join', async (req, res) => {
       canPublishData: true,
     });
 
-    const isReclaim = codeEntry.claimedAt !== Date.now();
-    logger.info({ roomName, agentId, customerId, isReclaim }, 'agent joined');
+    logger.info({ roomName, agentId, customerId, agentCount, isReclaim }, 'agent joined');
 
     res.json({
       roomName,
       livekitUrl: LIVEKIT_URL,
       token: await token.toJwt(),
       customerId,
+      agentCount,
     });
   } catch (err) {
     logger.error({ err }, 'agent/join failed');

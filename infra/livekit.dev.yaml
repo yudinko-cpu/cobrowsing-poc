@@ -35,10 +35,10 @@ logging:
   level: debug
   json: false
 
-# Лимиты для dev — можно оставить как в проде.
+# Лимиты для dev — как в проде.
 room:
   empty_timeout: 300
-  max_participants: 5
+  max_participants: 10      # 1 клиент + до 8 агентов (co-viewing) + запас. См. livekit.yaml.
   enabled_codecs:
     - mime: video/H264
     - mime: video/VP8
