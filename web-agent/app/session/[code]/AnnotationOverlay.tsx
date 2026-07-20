@@ -22,7 +22,7 @@
 
 import type * as React from 'react';
 import { useEffect, useRef, useState, type RefObject, type JSX } from 'react';
-import { RoomEvent, type RemoteParticipant, type DataPacket_Kind } from 'livekit-client';
+import { RoomEvent, ConnectionState, type RemoteParticipant, type DataPacket_Kind } from 'livekit-client';
 import { useRoomContext } from '@livekit/components-react';
 import {
   ANNO_TOPIC,
@@ -102,7 +102,7 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
   const lastPointerRef = useRef(0);
 
   // Метрики data-канала — для приёмки ANNO-7 (размеры пакетов, объём трафика).
-  const statsRef = useRef({ sent: 0, recv: 0, bytesSent: 0, bytesRecv: 0, maxMsg: 0 });
+  const statsRef = useRef({ sent: 0, recv: 0, bytesSent: 0, bytesRecv: 0, maxMsg: 0, failed: 0, dropped: 0 });
 
   // Инлайн-редактор текста.
   const [textDraft, setTextDraft] = useState<{ at: Point; x: number; y: number } | null>(null);
@@ -179,9 +179,15 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       // аннотаций; и наоборот — снапшот sync-state принимаем ТОЛЬКО от него,
       // потому что канонический стор живёт на клиенте.
       const isCustomer = participant?.name === 'Customer';
-      if (msg.op === 'sync-state') {
-        if (!isCustomer) return;
-      } else if (isCustomer) {
+      if (msg.op === 'sync-state' ? !isCustomer : isCustomer) {
+        // Отбрасывания логируем: иначе «аннотации не доходят» неотличимо от
+        // сбоя сети. name берётся из JWT (backend: 'Agent' / 'Customer').
+        statsRef.current.dropped += 1;
+        console.warn('[anno] сообщение отброшено гейтом прав', {
+          op: msg.op,
+          from: participant?.identity,
+          name: participant?.name,
+        });
         return;
       }
 
@@ -217,16 +223,22 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
     const requestSync = () => {
       const lp = room.localParticipant;
       if (!lp) return;
+      // Публиковать data до установления соединения нельзя — publishData
+      // отклонится. Раньше здесь этой проверки не было, и первый вызов
+      // (синхронно на монтировании) мог уходить в никуда.
+      if (room.state !== ConnectionState.Connected) return;
       const msg: AnnoMsg = {
         v: ANNO_VERSION,
         op: 'sync-req',
         author: lp.identity || 'agent',
         ts: Date.now(),
       };
-      void lp.publishData(encode(msg), { reliable: true, topic: ANNO_TOPIC }).catch(() => {});
+      void lp
+        .publishData(encode(msg), { reliable: true, topic: ANNO_TOPIC })
+        .catch((e: unknown) => console.error('[anno] sync-req не отправлен', e));
     };
 
-    requestSync(); // overlay монтируется уже после connect
+    requestSync(); // если уже подключены — спросим сразу
     room.on(RoomEvent.Connected, requestSync);
     room.on(RoomEvent.ParticipantConnected, requestSync); // клиент мог зайти позже нас
 
@@ -279,8 +291,20 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       console.warn(`[anno] пакет ${bytes.length}B > лимита ${MAX_PACKET_BYTES}B (op=${msg.op})`);
     }
 
-    // publishData асинхронный — fire-and-forget, ошибки сети не критичны.
-    void lp.publishData(bytes, { reliable: isReliable(msg.op), topic: ANNO_TOPIC }).catch(() => {});
+    // publishData асинхронный. Ошибку НЕ глушим: молчаливый сбой отправки
+    // выглядит как «аннотации не доходят», и найти его без лога невозможно.
+    try {
+      void lp
+        .publishData(bytes, { reliable: isReliable(msg.op), topic: ANNO_TOPIC })
+        .catch((e: unknown) => {
+          s.failed += 1;
+          console.error('[anno] publishData отклонён', { op: msg.op, bytes: bytes.length, error: e });
+        });
+    } catch (e) {
+      // Синхронный бросок (например, транспорт не готов) — тоже фиксируем.
+      s.failed += 1;
+      console.error('[anno] publishData бросил синхронно', { op: msg.op, error: e });
+    }
   };
 
   const emit = (msg: AnnoMsg) => {
@@ -508,7 +532,9 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
           `anno tx: ${statsRef.current.sent} (${fmtBytes(statsRef.current.bytesSent)})`,
           `anno rx: ${statsRef.current.recv} (${fmtBytes(statsRef.current.bytesRecv)})`,
           `max msg: ${statsRef.current.maxMsg} B / ${MAX_PACKET_BYTES}`,
+          `fail/drop: ${statsRef.current.failed} / ${statsRef.current.dropped}`,
           `items:   ${st.items.size}   ptr: ${st.pointers.size}`,
+          `me: ${myId}`,
         ].join('\n')}
       </div>
 
