@@ -158,6 +158,16 @@ public protocol CobrowseTransportDelegate: AnyObject {
                    didReceiveData data: Data,
                    topic: String,
                    fromParticipantIdentity identity: String?)
+
+    /// Удалённый участник (оператор) присоединился к сессии.
+    /// Нужно для ресинка аннотаций позднему подключению (sync-state).
+    func transport(_ transport: any CobrowseTransport,
+                   didConnectParticipant identity: String)
+
+    /// Удалённый участник (оператор) покинул сессию.
+    /// Нужно, чтобы снять его аннотации у всех (removeAuthor).
+    func transport(_ transport: any CobrowseTransport,
+                   didDisconnectParticipant identity: String)
 }
 
 public extension CobrowseTransportDelegate {
@@ -169,6 +179,10 @@ public extension CobrowseTransportDelegate {
                    didReceiveData data: Data,
                    topic: String,
                    fromParticipantIdentity identity: String?) {}
+    func transport(_ transport: any CobrowseTransport,
+                   didConnectParticipant identity: String) {}
+    func transport(_ transport: any CobrowseTransport,
+                   didDisconnectParticipant identity: String) {}
 }
 
 // MARK: - Transport protocol

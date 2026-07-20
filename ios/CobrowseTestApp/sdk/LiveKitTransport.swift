@@ -247,6 +247,16 @@ public final class LiveKitTransport: CobrowseTransport {
             fromParticipantIdentity: identity
         )
     }
+
+    fileprivate func handleParticipantConnected(_ identity: String?) {
+        guard let identity, !identity.isEmpty else { return }
+        delegate?.transport(self, didConnectParticipant: identity)
+    }
+
+    fileprivate func handleParticipantDisconnected(_ identity: String?) {
+        guard let identity, !identity.isEmpty else { return }
+        delegate?.transport(self, didDisconnectParticipant: identity)
+    }
 }
 
 // MARK: - LiveKit RoomDelegate proxy
@@ -284,5 +294,13 @@ private final class RoomDelegateProxy: NSObject, LiveKit.RoomDelegate {
             topic: topic,
             from: participant?.identity?.stringValue
         )
+    }
+
+    func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
+        owner?.handleParticipantConnected(participant.identity?.stringValue)
+    }
+
+    func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
+        owner?.handleParticipantDisconnected(participant.identity?.stringValue)
     }
 }

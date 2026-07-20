@@ -19,6 +19,8 @@ import {
 import type { DisconnectReason, RemoteTrack, RemoteTrackPublication, TrackPublication } from 'livekit-client';
 import '@livekit/components-styles';
 import { apiFetch } from '../../../lib/api';
+import { AnnotationOverlay } from './AnnotationOverlay';
+import { colorForIdentity } from '../../../lib/anno';
 
 /**
  * Идентичность агента в рамках вкладки браузера. Persist через sessionStorage,
@@ -154,6 +156,9 @@ function SessionView({
   const remoteParticipants = useRemoteParticipants();
   const connectionState = useConnectionState();
 
+  // Контейнер видео — точка отсчёта для контент-бокса overlay-аннотаций.
+  const videoBoxRef = useRef<HTMLDivElement>(null);
+
   // Отдельный лог на смену connection state — легко видно в консоли, где
   // именно застряли: connecting / connected / reconnecting / disconnected.
   useEffect(() => {
@@ -254,7 +259,7 @@ function SessionView({
         </div>
       </header>
 
-      <div style={styles.videoContainer}>
+      <div style={styles.videoContainer} ref={videoBoxRef}>
         {/* Локальный override поверх @livekit/components-styles.
             Default .lk-participant-media-video ставит object-fit:cover
             (обрезает по контейнеру). Overrid'ы для source=screen_share есть,
@@ -294,9 +299,11 @@ function SessionView({
           videoStats={videoStats}
           iceState={iceState}
         />
-      </div>
 
-      {/* TODO P1: оверлей для аннотаций, лазерная указка */}
+        {/* Операторские аннотации: SVG-слой поверх контент-бокса видео (ANNO-3).
+            Ввод/тулбар — ANNO-4. */}
+        <AnnotationOverlay containerRef={videoBoxRef} />
+      </div>
     </div>
   );
 }
@@ -364,7 +371,9 @@ function AgentRoster({ roster }: { roster: Array<{ identity: string; isLocal: bo
         <div style={styles.rosterPopover}>
           {roster.map((a) => (
             <div key={a.identity} style={styles.rosterItem}>
-              <span style={styles.rosterDot} />
+              {/* Цвет метки = цвет аннотаций оператора (colorForIdentity, FNV) —
+                  та же палитра, что на iOS: легенда «кто каким цветом рисует». */}
+              <span style={{ ...styles.rosterDot, background: colorForIdentity(a.identity) }} />
               <span style={{ fontFamily: 'ui-monospace, monospace' }}>{a.identity}</span>
               {a.isLocal && <span style={styles.rosterYou}>вы</span>}
             </div>

@@ -62,6 +62,12 @@ public final class CobrowseClient: ObservableObject {
     @Published public private(set) var screenShareOptions: ScreenShareOptions =
         ScreenShareOptions()
 
+    /// Канонический стор операторских аннотаций на клиенте. Наполняется входящими
+    /// data-сообщениями (маршрутизация — ANNO-2, в `didReceiveData`), рендерится
+    /// overlay-слоем (`AnnotationOverlayWindow`). Живёт при клиенте, потому что
+    /// именно сюда транспорт доставляет байты аннотаций.
+    public let annotations = AnnotationStore()
+
     /// Код, который клиент показывает и диктует оператору.
     /// Доступен во время .streaming и .reconnecting (в реконнекте код тот же).
     public var sessionCode: String? {
@@ -345,9 +351,27 @@ extension CobrowseClient: CobrowseTransportDelegate {
                                       didReceiveData data: Data,
                                       topic: String,
                                       fromParticipantIdentity identity: String?) {
-        // TODO P1: маршрутизировать по topic ("annotations", "control", ...) в соответствующий handler.
-        // Здесь пусто, потому что рисование аннотаций поверх UI — задача уровня приложения,
-        // а не SDK. SDK лишь доставляет байты.
+        // Доставляем байты в стор аннотаций. Фильтр по topic и декод — внутри
+        // AnnotationStore.handle; чужие топики (будущие control-каналы) он молча
+        // игнорирует. Транспорт остаётся нейтральным — SDK лишь маршрутизирует
+        // на MainActor, где живёт @Published-стор для overlay-рендера.
+        Task { @MainActor in
+            self.annotations.handle(data: data, topic: topic, from: identity)
+        }
+    }
+
+    public nonisolated func transport(_ transport: any CobrowseTransport,
+                                      didConnectParticipant identity: String) {
+        // ANNO-6: клиент — канонический стор, при подключении нового оператора
+        // отправит ему sync-state с текущими аннотациями. Пока — no-op.
+    }
+
+    public nonisolated func transport(_ transport: any CobrowseTransport,
+                                      didDisconnectParticipant identity: String) {
+        // Оператор ушёл — снимаем его аннотации у клиента (ANNO-5).
+        Task { @MainActor in
+            self.annotations.removeAuthor(identity)
+        }
     }
 }
 

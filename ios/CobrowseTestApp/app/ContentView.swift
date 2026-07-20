@@ -14,6 +14,9 @@ struct ContentView: View {
     @EnvironmentObject var client: CobrowseClient
     @State private var showVideoSettings = false
 
+    // Менеджер overlay-окна аннотаций. @State держит инстанс между перерисовками.
+    @State private var overlayHost = AnnotationOverlayHost()
+
     var body: some View {
         ZStack(alignment: .top) {
             TabView {
@@ -57,11 +60,52 @@ struct ContentView: View {
             VideoSettingsSheet(current: client.screenShareOptions)
                 .environmentObject(client)
         }
+        // Монтаж/демонтаж overlay-окна аннотаций по состоянию сессии.
+        // Видим при активной сессии (.streaming/.reconnecting), снимаем и чистим
+        // стор в терминальных состояниях (.ended/.error/.idle).
+        .onChange(of: overlayVisible, initial: true) { _, visible in
+            if visible {
+                overlayHost.show(store: client.annotations)
+            } else {
+                overlayHost.hide()
+                client.annotations.reset()
+            }
+        }
+        // DEBUG-жест: тап по невидимой зоне в левом-нижнем углу впрыскивает
+        // демо-аннотации — быстрая проверка координатного маппинга на устройстве
+        // (ANNO-1 AC3), пока входящий data-канал не подключён (ANNO-2).
+        #if DEBUG
+        .overlay(alignment: .bottomLeading) {
+            if overlayVisible {
+                Button {
+                    client.annotations.injectSampleAnnotations()
+                } label: {
+                    Image(systemName: "scribble")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(.black.opacity(0.5)))
+                }
+                .padding(.leading, 12)
+                .padding(.bottom, 80)
+                .accessibilityLabel("Демо-аннотации")
+            }
+        }
+        #endif
     }
 
     private var isStreaming: Bool {
         if case .streaming = client.state { return true }
         return false
+    }
+
+    /// Overlay виден при активной сессии — и в streaming, и в reconnecting
+    /// (реконнект идёт в ту же комнату, аннотации не сбрасываем).
+    private var overlayVisible: Bool {
+        switch client.state {
+        case .streaming, .reconnecting: return true
+        default: return false
+        }
     }
 }
 
