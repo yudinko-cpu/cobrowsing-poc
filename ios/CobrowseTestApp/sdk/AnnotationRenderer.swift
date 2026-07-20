@@ -51,6 +51,9 @@ struct AnnotationCanvasView: View {
             for p in store.pointers {
                 drawPointer(p, in: &ctx, rect: rect, shortSide: shortSide, nowMs: nowMs)
             }
+            for c in store.clicks {
+                drawClick(c, in: &ctx, rect: rect, shortSide: shortSide, nowMs: nowMs)
+            }
         }
         .allowsHitTesting(false)
         .ignoresSafeArea()
@@ -122,6 +125,32 @@ struct AnnotationCanvasView: View {
         let cr = r * 0.5
         ctx.fill(Path(ellipseIn: CGRect(x: c.x - cr, y: c.y - cr, width: 2 * cr, height: 2 * cr)),
                  with: .color(color.opacity(opacity)))
+    }
+
+    // MARK: Клик указкой
+
+    /// Кольцо расходится наружу и гаснет, ядро сжимается — «волна» в точке нажатия.
+    private func drawClick(_ c: AnnoClick, in ctx: inout GraphicsContext, rect: ContentRect, shortSide: CGFloat, nowMs: Double) {
+        let p = AnnoClickAnim.progress(ageMs: nowMs - c.ts)
+        guard p < 1 else { return }
+
+        let pos = AnnoCoords.point(fromNormalized: c.at, in: rect)
+        let color = Color(annoHex: c.color)
+        let r0 = max(4, shortSide * 0.012)
+        let r1 = max(16, shortSide * 0.06)
+        let r = r0 + (r1 - r0) * CGFloat(p)
+        let opacity = 1 - p
+
+        ctx.stroke(
+            Path(ellipseIn: CGRect(x: pos.x - r, y: pos.y - r, width: 2 * r, height: 2 * r)),
+            with: .color(color.opacity(opacity)),
+            style: StrokeStyle(lineWidth: max(2, shortSide * 0.005))
+        )
+        let cr = r0 * CGFloat(1 - p)
+        ctx.fill(
+            Path(ellipseIn: CGRect(x: pos.x - cr, y: pos.y - cr, width: 2 * cr, height: 2 * cr)),
+            with: .color(color.opacity(opacity * 0.8))
+        )
     }
 
     // MARK: Геометрия наконечника стрелки

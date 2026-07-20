@@ -34,6 +34,7 @@ export type Op =
   | 'remove' // удалить аннотацию по id (в т.ч. реализация Undo)
   | 'clear' // снять все (scope: own | all)
   | 'pointer' // эфемерная лазерная указка
+  | 'click' // клик указкой — эфемерная расходящаяся «волна»
   | 'sync-req' // запрос полного состояния (позднее подключение / реконнект)
   | 'sync-state'; // ответ с полным снапшотом
 
@@ -94,6 +95,12 @@ export interface Pointer {
   at: Point;
   ts: number;
 }
+
+/**
+ * Эфемерный клик указкой — расходящееся кольцо в точке нажатия.
+ * Форма совпадает с указкой; отличается только временем жизни и рендером.
+ */
+export type Click = Pointer;
 
 // ── Кодек ────────────────────────────────────────────────────────────────────
 
@@ -225,10 +232,12 @@ export interface AnnoState {
   items: Map<string, Annotation>;
   /** Эфемерные указки по автору. */
   pointers: Map<string, Pointer>;
+  /** Эфемерные клики указкой. Ключ `author:ts` — их может быть несколько сразу. */
+  clicks: Map<string, Click>;
 }
 
 export function newState(): AnnoState {
-  return { items: new Map(), pointers: new Map() };
+  return { items: new Map(), pointers: new Map(), clicks: new Map() };
 }
 
 /**
@@ -303,15 +312,28 @@ export function apply(
       if (msg.scope === 'all') {
         state.items.clear();
         state.pointers.clear();
+        state.clicks.clear();
       } else {
         for (const [id, a] of state.items) if (a.author === msg.author) state.items.delete(id);
         state.pointers.delete(msg.author);
+        for (const [k, c] of state.clicks) if (c.author === msg.author) state.clicks.delete(k);
       }
       return;
     }
     case 'pointer': {
       if (!msg.at) return;
       state.pointers.set(msg.author, {
+        author: msg.author,
+        color: msg.color ?? colorForIdentity(msg.author),
+        at: msg.at,
+        ts: msg.ts,
+      });
+      return;
+    }
+    case 'click': {
+      if (!msg.at) return;
+      // Ключ с ts: несколько кликов подряд должны сосуществовать и гаснуть каждый свой.
+      state.clicks.set(`${msg.author}:${msg.ts}`, {
         author: msg.author,
         color: msg.color ?? colorForIdentity(msg.author),
         at: msg.at,
@@ -334,6 +356,7 @@ export function apply(
 export function removeAuthor(state: AnnoState, author: string): void {
   for (const [id, a] of state.items) if (a.author === author) state.items.delete(id);
   state.pointers.delete(author);
+  for (const [k, c] of state.clicks) if (c.author === author) state.clicks.delete(k);
 }
 
 /** Снять протухшие указки (не обновлялись дольше ttlMs). */
@@ -353,6 +376,22 @@ export function pointerOpacity(ageMs: number): number {
   if (ageMs <= POINTER_HOLD_MS) return 1;
   if (ageMs >= POINTER_TTL_MS) return 0;
   return 1 - (ageMs - POINTER_HOLD_MS) / (POINTER_TTL_MS - POINTER_HOLD_MS);
+}
+
+// ── Клик указкой («волна») ────────────────────────────────────────────────────
+
+/** Время жизни анимации клика. */
+export const CLICK_TTL_MS = 600;
+
+/** Прогресс анимации клика 0→1: радиус растёт, непрозрачность падает. */
+export function clickProgress(ageMs: number): number {
+  const p = ageMs / CLICK_TTL_MS;
+  return p < 0 ? 0 : p > 1 ? 1 : p;
+}
+
+/** Снять отыгравшие клики. */
+export function expireClicks(state: AnnoState, now: number, ttlMs = CLICK_TTL_MS): void {
+  for (const [k, c] of state.clicks) if (now - c.ts > ttlMs) state.clicks.delete(k);
 }
 
 /** Полный снапшот персистентных аннотаций — тело sync-state. */

@@ -119,6 +119,22 @@ public struct AnnoPointer: Equatable {
     public var ts: Double
 }
 
+/// Эфемерный клик указкой — расходящееся кольцо в точке нажатия.
+/// Форма совпадает с указкой; отличаются время жизни и рендер (зеркало `Click` в anno.ts).
+public typealias AnnoClick = AnnoPointer
+
+/// Параметры анимации клика. Единый источник для стора (истечение) и рендера.
+public enum AnnoClickAnim {
+    /// Время жизни анимации, мс. Должно совпадать с CLICK_TTL_MS в anno.ts.
+    public static let ttlMs: Double = 600
+
+    /// Прогресс 0→1: радиус растёт, непрозрачность падает.
+    public static func progress(ageMs: Double) -> Double {
+        let p = ageMs / ttlMs
+        return p < 0 ? 0 : (p > 1 ? 1 : p)
+    }
+}
+
 // MARK: - Кодек
 
 public enum AnnoCodec {
@@ -238,6 +254,8 @@ public enum AnnoColor {
 public final class AnnoState {
     public private(set) var items: [String: Annotation] = [:] // персистентные, по id
     public private(set) var pointers: [String: AnnoPointer] = [:] // эфемерные, по автору
+    /// Эфемерные клики указкой. Ключ `author:ts` — их может быть несколько одновременно.
+    public private(set) var clicks: [String: AnnoClick] = [:]
 
     public init() {}
 
@@ -284,14 +302,25 @@ public final class AnnoState {
             if msg.scope == "all" {
                 items.removeAll()
                 pointers.removeAll()
+                clicks.removeAll()
             } else {
                 items = items.filter { $0.value.author != msg.author }
                 pointers.removeValue(forKey: msg.author)
+                clicks = clicks.filter { $0.value.author != msg.author }
             }
 
         case "pointer":
             guard let at = msg.at else { return }
             pointers[msg.author] = AnnoPointer(
+                author: msg.author,
+                color: msg.color ?? AnnoColor.hex(forIdentity: msg.author),
+                at: at, ts: msg.ts
+            )
+
+        case "click":
+            guard let at = msg.at else { return }
+            // Ключ с ts: несколько кликов подряд сосуществуют и гаснут каждый свой.
+            clicks["\(msg.author):\(msg.ts)"] = AnnoClick(
                 author: msg.author,
                 color: msg.color ?? AnnoColor.hex(forIdentity: msg.author),
                 at: at, ts: msg.ts
@@ -315,17 +344,24 @@ public final class AnnoState {
     public func removeAuthor(_ author: String) {
         items = items.filter { $0.value.author != author }
         pointers.removeValue(forKey: author)
+        clicks = clicks.filter { $0.value.author != author }
     }
 
     /// Полная очистка (снятие overlay по .ended/.error).
     public func clearAll() {
         items.removeAll()
         pointers.removeAll()
+        clicks.removeAll()
     }
 
     /// Снять протухшие указки (не обновлялись дольше ttl, мс).
     public func expirePointers(now: Double, ttlMs: Double = 1000) {
         pointers = pointers.filter { now - $0.value.ts <= ttlMs }
+    }
+
+    /// Снять отыгравшие клики.
+    public func expireClicks(now: Double, ttlMs: Double = AnnoClickAnim.ttlMs) {
+        clicks = clicks.filter { now - $0.value.ts <= ttlMs }
     }
 
     /// Полный снапшот персистентных аннотаций — тело sync-state.

@@ -34,6 +34,9 @@ import {
   MAX_PACKET_BYTES,
   MAX_PATH_POINTS,
   ANNO_TOPIC,
+  expireClicks,
+  clickProgress,
+  CLICK_TTL_MS,
 } from './anno.ts';
 
 let passed = 0;
@@ -346,6 +349,46 @@ test('quantize округляет до 4 знаков', () => {
 
 test('топик протокола стабилен', () => {
   assert.equal(ANNO_TOPIC, 'cobrowse.anno');
+});
+
+// ── Клик указкой ──────────────────────────────────────────────────────────────
+
+test('click ставится и истекает по TTL', () => {
+  const s = newState();
+  apply(s, mk('click', 'a', { at: [0.3, 0.4] }));
+  assert.equal(s.clicks.size, 1);
+  expireClicks(s, now + CLICK_TTL_MS / 2);
+  assert.equal(s.clicks.size, 1);
+  expireClicks(s, now + CLICK_TTL_MS + 50);
+  assert.equal(s.clicks.size, 0);
+});
+
+test('несколько кликов подряд сосуществуют (ключ по ts)', () => {
+  const s = newState();
+  apply(s, { v: ANNO_VERSION, op: 'click', author: 'a', ts: now, at: [0.1, 0.1] });
+  apply(s, { v: ANNO_VERSION, op: 'click', author: 'a', ts: now + 100, at: [0.2, 0.2] });
+  assert.equal(s.clicks.size, 2);
+});
+
+test('clear own и removeAuthor убирают клики автора', () => {
+  const s = newState();
+  apply(s, mk('click', 'a', { at: [0.1, 0.1] }));
+  apply(s, { v: ANNO_VERSION, op: 'click', author: 'b', ts: now + 1, at: [0.2, 0.2] });
+  apply(s, mk('clear', 'a', { scope: 'own' }));
+  assert.equal(s.clicks.size, 1);
+  removeAuthor(s, 'b');
+  assert.equal(s.clicks.size, 0);
+});
+
+test('clickProgress идёт 0→1 и зажимается', () => {
+  assert.equal(clickProgress(0), 0);
+  assert.ok(Math.abs(clickProgress(CLICK_TTL_MS / 2) - 0.5) < 1e-9);
+  assert.equal(clickProgress(CLICK_TTL_MS), 1);
+  assert.equal(clickProgress(CLICK_TTL_MS * 3), 1);
+});
+
+test('click — reliable (разовое событие-акцент)', () => {
+  assert.equal(isReliable('click'), true);
 });
 
 console.log(`\n${passed} tests passed.`);

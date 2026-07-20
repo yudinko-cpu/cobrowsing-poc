@@ -35,6 +35,8 @@ import {
   apply,
   removeAuthor,
   expirePointers,
+  expireClicks,
+  clickProgress,
   contentRect,
   fromNormalized,
   colorForIdentity,
@@ -44,6 +46,7 @@ import {
   MAX_PACKET_BYTES,
   type AnnoMsg,
   type Annotation,
+  type Click,
   type Op,
   type Pointer,
   type Point,
@@ -254,11 +257,14 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
     };
   }, [room]);
 
-  // ── Тикер угасания указок ───────────────────────────────────────────────────
+  // ── Тикер угасания указок и кликов ──────────────────────────────────────────
   useEffect(() => {
     const id = setInterval(() => {
-      if (stateRef.current.pointers.size === 0) return;
-      expirePointers(stateRef.current, Date.now());
+      const s = stateRef.current;
+      if (s.pointers.size === 0 && s.clicks.size === 0) return;
+      const t = Date.now();
+      expirePointers(s, t);
+      expireClicks(s, t);
       bump();
     }, 33);
     return () => clearInterval(id);
@@ -324,10 +330,21 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
 
   // ── Указатель: down / move / up ─────────────────────────────────────────────
   const onPointerDown = (e: React.PointerEvent) => {
-    if (tool === 'off' || tool === 'pointer') return;
+    if (tool === 'off') return;
+
+    if (tool === 'pointer') {
+      // Клик указкой — эфемерная «волна» в точке нажатия, видна всем участникам.
+      // Reliable: это разовое событие-акцент, потерять его нельзя.
+      emit(makeMsg({ op: 'click', color: myColor, at: pointFromEvent(e) }));
+      return;
+    }
+
     const p = pointFromEvent(e);
 
     if (tool === 'text') {
+      // Клик в новое место при открытом поле — сначала фиксируем предыдущий ввод,
+      // иначе набранный текст потерялся бы.
+      if (textDraft) confirmText();
       setTextDraft({ at: p, x: rect.x + p[0] * rect.w, y: rect.y + p[1] * rect.h });
       textValueRef.current = '';
       return;
@@ -451,6 +468,7 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       >
         {[...st.items.values()].map((a) => renderAnnotation(a, rect, shortSide))}
         {[...st.pointers.values()].map((p) => renderPointer(p, rect, shortSide, now))}
+        {[...st.clicks.values()].map((c) => renderClick(c, rect, shortSide, now))}
       </svg>
 
       {/* Слой ввода — ровно контент-бокс видео. Ловит события только когда выбран
@@ -460,6 +478,10 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          // Гасим дефолт mousedown: иначе браузер уводит фокус на <body>
+          // (этот div не фокусируемый), инлайн-поле текста мгновенно получает
+          // blur и закрывается — поле просто не успевало показаться.
+          onMouseDown={(e) => e.preventDefault()}
           style={{
             position: 'absolute',
             left: rect.x,
@@ -736,6 +758,32 @@ function renderAnnotation(a: Annotation, rect: ContentRect, shortSide: number): 
     default:
       return null;
   }
+}
+
+/** Клик указкой: кольцо расходится наружу и гаснет, ядро сжимается. */
+function renderClick(c: Click, rect: ContentRect, shortSide: number, now: number): JSX.Element | null {
+  const p = clickProgress(now - c.ts);
+  if (p >= 1) return null;
+  const pos = fromNormalized(c.at[0], c.at[1], rect);
+  const color = c.color || colorForIdentity(c.author);
+  const r0 = Math.max(4, shortSide * 0.012);
+  const r1 = Math.max(16, shortSide * 0.06);
+  const r = r0 + (r1 - r0) * p;
+  const opacity = 1 - p;
+  return (
+    <g key={`click-${c.author}-${c.ts}`}>
+      <circle
+        cx={pos.x}
+        cy={pos.y}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={Math.max(2, shortSide * 0.005)}
+        opacity={opacity}
+      />
+      <circle cx={pos.x} cy={pos.y} r={r0 * (1 - p)} fill={color} opacity={opacity * 0.8} />
+    </g>
+  );
 }
 
 function renderPointer(p: Pointer, rect: ContentRect, shortSide: number, now: number): JSX.Element | null {

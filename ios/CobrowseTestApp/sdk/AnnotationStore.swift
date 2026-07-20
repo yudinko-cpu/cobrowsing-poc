@@ -22,6 +22,8 @@ public final class AnnotationStore: ObservableObject {
     @Published public private(set) var annotations: [Annotation] = []
     /// Эфемерные указки операторов (гаснут по TTL).
     @Published public private(set) var pointers: [AnnoPointer] = []
+    /// Эфемерные клики указкой (расходящееся кольцо).
+    @Published public private(set) var clicks: [AnnoClick] = []
 
     /// Чистая модель + семантика мёржа (зеркалит web anno.ts).
     private let state = AnnoState()
@@ -40,7 +42,9 @@ public final class AnnotationStore: ObservableObject {
 
     private var expiryTask: Task<Void, Never>?
     private let pointerTtlMs: Double = 1000
-    private let expiryTickNs: UInt64 = 100_000_000  // 0.1 c
+    // ~30 fps: этого хватает и на плавное угасание указки, и на анимацию
+    // кольца клика (600 мс). Тик крутится только пока есть живые эфемериды.
+    private let expiryTickNs: UInt64 = 33_000_000
 
     public init() {}
 
@@ -109,6 +113,7 @@ public final class AnnotationStore: ObservableObject {
     private func publish() {
         annotations = state.snapshot()
         pointers = Array(state.pointers.values)
+        clicks = Array(state.clicks.values)
     }
 
     // MARK: - Фейд указок
@@ -117,13 +122,13 @@ public final class AnnotationStore: ObservableObject {
     /// @Sendable-блоком, захватывающим @MainActor self, недопустим. Task,
     /// созданный в @MainActor-контексте, наследует MainActor — гонок нет.
     private func ensureExpiryLoop() {
-        guard expiryTask == nil, !state.pointers.isEmpty else { return }
+        guard expiryTask == nil, !(state.pointers.isEmpty && state.clicks.isEmpty) else { return }
         expiryTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: self?.expiryTickNs ?? 100_000_000)
+                try? await Task.sleep(nanoseconds: self?.expiryTickNs ?? 33_000_000)
                 guard let self else { return }
                 self.tickExpiry()
-                if self.state.pointers.isEmpty {
+                if self.state.pointers.isEmpty && self.state.clicks.isEmpty {
                     self.stopExpiryLoop()
                     return
                 }
@@ -134,6 +139,7 @@ public final class AnnotationStore: ObservableObject {
     private func tickExpiry() {
         let nowMs = Date().timeIntervalSince1970 * 1000
         state.expirePointers(now: nowMs, ttlMs: pointerTtlMs)
+        state.expireClicks(now: nowMs)
         publish()
     }
 
