@@ -30,17 +30,26 @@ RUN mkdir -p /app/public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
-FROM node:20-alpine AS runner
+# Тот же тег базового образа, что и в deps/builder: иначе CI тянет и кэширует
+# два разных base-слоя вместо одного.
+FROM node:24-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+# standalone-сервер читает порт/хост из env, а не из аргументов CLI.
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 
-# Только то, что нужно для `next start`.
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/package-lock.json ./package-lock.json
-COPY --from=builder /app/.next ./.next
+# next.config.mjs: output: 'standalone' — Next трассирует рантайм-зависимости и
+# кладёт самодостаточный server.js + минимальный node_modules в .next/standalone.
+# Копируем только его: полный node_modules (290 МБ, с devDependencies) в прод-образ
+# не едет. Меньше слой → быстрее exporting layers, push в GHCR и экспорт GHA-кэша.
+#
+# .next/static и public/ в standalone НЕ входят — копируем отдельно, порядок важен:
+# сначала standalone (он создаёт ./.next), потом static внутрь него.
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
 
 EXPOSE 3000
-CMD ["npx", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
+CMD ["node", "server.js"]

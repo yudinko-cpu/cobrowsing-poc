@@ -42,23 +42,37 @@ env:
   IMAGE_WEB_AGENT: ${{ github.repository }}-web-agent
 
 jobs:
+  # Матрица вместо двух шагов в одной джобе: backend и web-agent собираются на
+  # разных раннерах параллельно, поэтому wall-time = max(backend, web-agent),
+  # а не их сумма. Тег образа больше не отдаётся через outputs — это просто
+  # github.sha, и матричные джобы всё равно не умеют отдавать общий output.
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write  # для push в GHCR
 
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tag }}
+    strategy:
+      fail-fast: false  # падение одного образа не отменяет сборку второго
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+            file: ./backend/Dockerfile
+            image: ${{ github.repository }}-backend
+            build_args: ''
+          - name: web-agent
+            context: ./web-agent
+            file: ./web-agent/Dockerfile
+            image: ${{ github.repository }}-web-agent
+            # NEXT_PUBLIC_* инжектится Next'ом при сборке — API URL нужно передать
+            # как build-arg, иначе он окажется undefined и fetch пойдёт в никуда
+            # (см. web-agent/lib/api.ts).
+            build_args: NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set image tag
-        id: meta
-        # Полный SHA как тег — уникально и годится для rollback.
-        run: echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -70,34 +84,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push backend
+      - name: Build & push ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
           # Кэш через GHA — на порядок быстрее пересборка при мелких правках.
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,scope=backend,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+          # Без provenance/SBOM: иначе buildx пушит attestation-манифест и
+          # manifest list поверх обычного образа — лишние round-trip'ы в GHCR
+          # ради метаданных, которые тут никто не проверяет.
+          provenance: false
+          sbom: false
+          build-args: ${{ matrix.build_args }}
+          # Полный SHA как тег — уникально и годится для rollback.
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}:latest
-
-      - name: Build & push web-agent
-        uses: docker/build-push-action@v6
-        with:
-          context: ./web-agent
-          file: ./web-agent/Dockerfile
-          push: true
-          cache-from: type=gha,scope=web-agent
-          cache-to: type=gha,scope=web-agent,mode=max
-          # NEXT_PUBLIC_* инжектится Next'ом при сборке — API URL нужно передать
-          # как build-arg, иначе он окажется undefined и fetch пойдёт в никуда
-          # (см. web-agent/lib/api.ts).
-          build-args: |
-            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_WEB_AGENT }}:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_WEB_AGENT }}:latest
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:latest
 
   deploy:
     needs: build-and-push
@@ -124,9 +129,9 @@ jobs:
             # 2) Пинним тег текущего SHA в .env — docker compose подхватит через ${IMAGE_TAG}.
             #    Если .env уже содержит IMAGE_TAG=, заменяем; иначе — дописываем.
             if grep -q '^IMAGE_TAG=' infra/.env; then
-              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}|" infra/.env
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ github.sha }}|" infra/.env
             else
-              echo "IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}" >> infra/.env
+              echo "IMAGE_TAG=${{ github.sha }}" >> infra/.env
             fi
 
             # 3) Рендерим livekit.yaml — подставляем LiveKit ключи из .env.
