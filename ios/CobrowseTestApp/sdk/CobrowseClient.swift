@@ -94,6 +94,36 @@ public final class CobrowseClient: ObservableObject {
         self.transport = transport
         self.urlSession = urlSession
         self.transport.delegate = self
+
+        // ANNO-6: клиент — канонический стор аннотаций. Когда оператор
+        // подключается позже (или после F5) и просит ресинк — отвечаем ему
+        // адресно полным снапшотом.
+        self.annotations.onSyncRequest = { [weak self] requester in
+            self?.sendSyncState(to: requester)
+        }
+    }
+
+    /// Отправить снапшот аннотаций конкретному оператору (ответ на sync-req).
+    /// Адресно, а не broadcast'ом — остальным участникам это состояние не нужно.
+    private func sendSyncState(to requester: String) {
+        let msg = AnnoMsg(
+            op: "sync-state",
+            // Поле author для sync-state не используется reducer'ом: авторство
+            // несёт каждый item. Получатель всё равно перезапишет его на
+            // аутентифицированную identity отправителя.
+            author: "client",
+            ts: Date().timeIntervalSince1970 * 1000,
+            items: annotations.snapshot()
+        )
+        guard let data = AnnoCodec.encode(msg) else { return }
+        Task {
+            try? await self.transport.sendData(
+                data,
+                topic: AnnoProtocol.topic,
+                reliable: true,
+                destinationIdentities: [requester]
+            )
+        }
     }
 
     /// Convenience: дефолтный LiveKit-транспорт.

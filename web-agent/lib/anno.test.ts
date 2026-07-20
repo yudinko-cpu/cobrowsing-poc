@@ -28,6 +28,12 @@ import {
   pointerOpacity,
   POINTER_HOLD_MS,
   POINTER_TTL_MS,
+  quantize,
+  simplifyPath,
+  encodedSize,
+  MAX_PACKET_BYTES,
+  MAX_PATH_POINTS,
+  ANNO_TOPIC,
 } from './anno.ts';
 
 let passed = 0;
@@ -228,6 +234,27 @@ test('3 оператора: раздельные наборы, свои цвет
   assert.ok([...s.items.values()].some((a) => a.author === 'agent-c'));
 });
 
+test('повторный sync-state не создаёт дубликатов (F5 оператора)', () => {
+  const src = newState();
+  apply(src, mk('add', 'a', { id: 'a:1', kind: 'path', pts: [[0, 0]] }));
+  apply(src, mk('add', 'b', { id: 'b:1', kind: 'arrow', from: [0, 0], to: [1, 1] }));
+  const items = snapshot(src);
+
+  const dst = newState();
+  apply(dst, mk('sync-state', 'client', { items }));
+  apply(dst, mk('sync-state', 'client', { items })); // повторный ресинк
+  assert.equal(dst.items.size, 2);
+});
+
+test('снапшот для sync-state не содержит эфемерных указок', () => {
+  const s = newState();
+  apply(s, mk('add', 'a', { id: 'a:1', kind: 'path', pts: [[0, 0]] }));
+  apply(s, mk('pointer', 'a', { at: [0.5, 0.5] }));
+  const items = snapshot(s);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'path');
+});
+
 test('removeAuthor чистит аннотации ушедшего оператора', () => {
   const s = newState();
   apply(s, mk('add', 'a', { id: 'a:1', kind: 'path', pts: [[0, 0]] }));
@@ -260,6 +287,65 @@ test('pointerOpacity: hold → линейный спад → 0', () => {
   assert.ok(Math.abs(pointerOpacity(mid) - 0.5) < 1e-9);
   assert.equal(pointerOpacity(POINTER_TTL_MS), 0);
   assert.equal(pointerOpacity(POINTER_TTL_MS + 100), 0);
+});
+
+// ── ANNO-7: устойчивость к потерям и размеры пакетов ─────────────────────────
+
+test('AC4: потеря lossy-append не искажает финальную геометрию', () => {
+  // Оператор ведёт штрих из 6 точек; в сеть уходят add + append'ы + end.
+  const full: [number, number][] = [
+    [0.1, 0.1],
+    [0.2, 0.15],
+    [0.3, 0.25],
+    [0.4, 0.2],
+    [0.5, 0.3],
+    [0.6, 0.35],
+  ];
+
+  const receiver = newState();
+  apply(receiver, mk('add', 'a', { id: 'a:1', kind: 'path', pts: [full[0]] }));
+  // Часть append'ов «потерялась» — доходит только один из середины.
+  apply(receiver, mk('append', 'a', { id: 'a:1', pts: [full[2]] }));
+  // Финальный end (reliable) несёт полную геометрию.
+  apply(receiver, mk('end', 'a', { id: 'a:1', pts: full }));
+
+  assert.deepEqual(receiver.items.get('a:1')!.pts, full);
+});
+
+test('simplifyPath сохраняет концы и сокращает лишние точки', () => {
+  // Почти прямая линия из 50 точек → должна ужаться до пары концов.
+  const pts: [number, number][] = [];
+  for (let i = 0; i < 50; i++) pts.push([i / 49, 0.5]);
+  const out = simplifyPath(pts);
+  assert.deepEqual(out[0], quantize(pts[0]));
+  assert.deepEqual(out[out.length - 1], quantize(pts[pts.length - 1]));
+  assert.ok(out.length < pts.length);
+});
+
+test('simplifyPath не превышает жёсткий кап точек', () => {
+  // Пила: RDP почти ничего не выбросит, сработает децимация.
+  const pts: [number, number][] = [];
+  for (let i = 0; i < 3000; i++) pts.push([i / 2999, i % 2 === 0 ? 0.2 : 0.8]);
+  const out = simplifyPath(pts);
+  assert.ok(out.length <= MAX_PATH_POINTS, `points=${out.length}`);
+});
+
+test('AC2: длинный штрих в end влезает в лимит пакета', () => {
+  const pts: [number, number][] = [];
+  for (let i = 0; i < 5000; i++) {
+    pts.push([Math.random(), Math.random()]);
+  }
+  const msg = mk('end', 'agent-abcdef', { id: 'agent-abcdef:1', pts: simplifyPath(pts) });
+  const size = encodedSize(msg);
+  assert.ok(size < MAX_PACKET_BYTES, `size=${size}`);
+});
+
+test('quantize округляет до 4 знаков', () => {
+  assert.deepEqual(quantize([0.123456789, 0.987654321]), [0.1235, 0.9877]);
+});
+
+test('топик протокола стабилен', () => {
+  assert.equal(ANNO_TOPIC, 'cobrowse.anno');
 });
 
 console.log(`\n${passed} tests passed.`);

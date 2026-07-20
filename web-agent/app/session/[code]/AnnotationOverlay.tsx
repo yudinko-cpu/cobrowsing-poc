@@ -39,6 +39,9 @@ import {
   fromNormalized,
   colorForIdentity,
   pointerOpacity,
+  quantize,
+  simplifyPath,
+  MAX_PACKET_BYTES,
   type AnnoMsg,
   type Annotation,
   type Op,
@@ -63,6 +66,12 @@ const TOOLS: { tool: Tool; icon: string; title: string }[] = [
 ];
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+function fmtBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(2)} MB`;
+}
 
 export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HTMLDivElement | null> }) {
   const room = useRoomContext();
@@ -91,6 +100,9 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
   } | null>(null);
   const lastAppendRef = useRef(0);
   const lastPointerRef = useRef(0);
+
+  // Метрики data-канала — для приёмки ANNO-7 (размеры пакетов, объём трафика).
+  const statsRef = useRef({ sent: 0, recv: 0, bytesSent: 0, bytesRecv: 0, maxMsg: 0 });
 
   // Инлайн-редактор текста.
   const [textDraft, setTextDraft] = useState<{ at: Point; x: number; y: number } | null>(null);
@@ -158,8 +170,21 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       topic?: string,
     ) => {
       if (topic !== ANNO_TOPIC) return;
+      statsRef.current.recv += 1;
+      statsRef.current.bytesRecv += payload.length;
       const msg = decode(payload);
       if (!msg) return;
+
+      // Гейт прав (§6.4). Клиент («Customer» в JWT-имени) не может быть автором
+      // аннотаций; и наоборот — снапшот sync-state принимаем ТОЛЬКО от него,
+      // потому что канонический стор живёт на клиенте.
+      const isCustomer = participant?.name === 'Customer';
+      if (msg.op === 'sync-state') {
+        if (!isCustomer) return;
+      } else if (isCustomer) {
+        return;
+      }
+
       if (participant?.identity) msg.author = participant.identity; // анти-спуфинг
       apply(stateRef.current, msg);
       bump();
@@ -180,6 +205,40 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
     room.on(RoomEvent.ParticipantDisconnected, onLeft);
     return () => {
       room.off(RoomEvent.ParticipantDisconnected, onLeft);
+    };
+  }, [room]);
+
+  // ── Ресинк: просим у клиента текущее состояние (ANNO-6) ─────────────────────
+  // Нужен при позднем подключении оператора и после F5. Клиент отвечает
+  // адресным sync-state; мёрж идёт по id, поэтому дубликатов не возникает.
+  useEffect(() => {
+    if (!room) return;
+
+    const requestSync = () => {
+      const lp = room.localParticipant;
+      if (!lp) return;
+      const msg: AnnoMsg = {
+        v: ANNO_VERSION,
+        op: 'sync-req',
+        author: lp.identity || 'agent',
+        ts: Date.now(),
+      };
+      void lp.publishData(encode(msg), { reliable: true, topic: ANNO_TOPIC }).catch(() => {});
+    };
+
+    requestSync(); // overlay монтируется уже после connect
+    room.on(RoomEvent.Connected, requestSync);
+    room.on(RoomEvent.ParticipantConnected, requestSync); // клиент мог зайти позже нас
+
+    // Одна отложенная попытка: сразу после connect data-канал мог быть не готов.
+    const retry = setTimeout(() => {
+      if (stateRef.current.items.size === 0) requestSync();
+    }, 1000);
+
+    return () => {
+      room.off(RoomEvent.Connected, requestSync);
+      room.off(RoomEvent.ParticipantConnected, requestSync);
+      clearTimeout(retry);
     };
   }, [room]);
 
@@ -209,8 +268,19 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
   const send = (msg: AnnoMsg) => {
     const lp = room?.localParticipant;
     if (!lp) return;
+    const bytes = encode(msg);
+
+    const s = statsRef.current;
+    s.sent += 1;
+    s.bytesSent += bytes.length;
+    if (bytes.length > s.maxMsg) s.maxMsg = bytes.length;
+    if (bytes.length > MAX_PACKET_BYTES) {
+      // Не должно случаться: финальная геометрия упрощается перед отправкой.
+      console.warn(`[anno] пакет ${bytes.length}B > лимита ${MAX_PACKET_BYTES}B (op=${msg.op})`);
+    }
+
     // publishData асинхронный — fire-and-forget, ошибки сети не критичны.
-    void lp.publishData(encode(msg), { reliable: isReliable(msg.op), topic: ANNO_TOPIC }).catch(() => {});
+    void lp.publishData(bytes, { reliable: isReliable(msg.op), topic: ANNO_TOPIC }).catch(() => {});
   };
 
   const emit = (msg: AnnoMsg) => {
@@ -224,7 +294,8 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
   const pointFromEvent = (e: React.PointerEvent): Point => {
     const w = rect.w || 1;
     const h = rect.h || 1;
-    return [clamp01(e.nativeEvent.offsetX / w), clamp01(e.nativeEvent.offsetY / h)];
+    // Квантуем сразу на входе — все исходящие сообщения становятся компактнее.
+    return quantize([clamp01(e.nativeEvent.offsetX / w), clamp01(e.nativeEvent.offsetY / h)]);
   };
 
   // ── Указатель: down / move / up ─────────────────────────────────────────────
@@ -274,7 +345,8 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       d.pts!.push(p);
       d.pending!.push(p);
       applyLocal(makeMsg({ op: 'append', id: d.id, pts: [p] })); // плавно локально
-      if (now - lastAppendRef.current > 50) {
+      // Флашим по времени ИЛИ по объёму — батч не должен раздуваться на быстром вводе.
+      if (now - lastAppendRef.current > 50 || d.pending!.length >= 32) {
         send(makeMsg({ op: 'append', id: d.id, pts: d.pending! })); // батч по сети
         d.pending = [];
         lastAppendRef.current = now;
@@ -295,8 +367,10 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
 
     if (d.kind === 'path') {
       if (d.pending && d.pending.length) send(makeMsg({ op: 'append', id: d.id, pts: d.pending }));
-      // end с полной геометрией (reliable) — гарантия при потере lossy-апдейтов.
-      emit(makeMsg({ op: 'end', id: d.id, pts: d.pts }));
+      // end несёт полную геометрию (reliable) — гарантия при потере lossy-апдейтов.
+      // Упрощаем (RDP + кап), чтобы длинный штрих гарантированно влезал в пакет;
+      // локально применяем ту же упрощённую версию, чтобы картинка совпадала с чужой.
+      emit(makeMsg({ op: 'end', id: d.id, pts: simplifyPath(d.pts ?? []) }));
     } else {
       emit(makeMsg({ op: 'end', id: d.id, from: d.from, to: p }));
     }
@@ -411,6 +485,32 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
           }}
         />
       )}
+
+      {/* Метрики data-канала — для приёмки ANNO-7 (размеры пакетов, объём). */}
+      <div
+        style={{
+          position: 'absolute',
+          right: 12,
+          bottom: 12,
+          zIndex: 15,
+          padding: '6px 8px',
+          background: 'rgba(0,0,0,0.7)',
+          color: '#9ca3af',
+          fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+          fontSize: 11,
+          lineHeight: 1.5,
+          borderRadius: 6,
+          pointerEvents: 'none',
+          whiteSpace: 'pre',
+        }}
+      >
+        {[
+          `anno tx: ${statsRef.current.sent} (${fmtBytes(statsRef.current.bytesSent)})`,
+          `anno rx: ${statsRef.current.recv} (${fmtBytes(statsRef.current.bytesRecv)})`,
+          `max msg: ${statsRef.current.maxMsg} B / ${MAX_PACKET_BYTES}`,
+          `items:   ${st.items.size}   ptr: ${st.pointers.size}`,
+        ].join('\n')}
+      </div>
 
       {/* Тулбар. */}
       <div

@@ -382,6 +382,94 @@ export class IdGen {
   }
 }
 
+// ── Компактность и упрощение геометрии ───────────────────────────────────────
+//
+// Финальный `end` штриха несёт полную геометрию (гарантия при потере lossy
+// append'ов), поэтому именно он рискует пробить лимит пакета. Три меры:
+// квантование координат, RDP-упрощение и жёсткий кап числа точек.
+
+/** Практический потолок размера data-пакета LiveKit (байты). */
+export const MAX_PACKET_BYTES = 15000;
+
+/** Жёсткий потолок точек в финальной геометрии штриха. */
+export const MAX_PATH_POINTS = 400;
+
+/** Допуск упрощения в нормализованных единицах (доля контент-бокса). */
+export const SIMPLIFY_TOLERANCE = 0.002;
+
+/**
+ * Квантование нормализованной координаты. 4 знака = 1/10000 контент-бокса,
+ * то есть заведомо меньше пикселя на любом экране, но payload короче ~на треть.
+ */
+export function quantize(p: Point, decimals = 4): Point {
+  const k = 10 ** decimals;
+  return [Math.round(p[0] * k) / k, Math.round(p[1] * k) / k];
+}
+
+/** Расстояние от точки до отрезка (для RDP). */
+function perpDistance(p: Point, a: Point, b: Point): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  if (dx === 0 && dy === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy);
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+/** Ramer–Douglas–Peucker: выбрасывает точки, не влияющие на форму. */
+function rdp(pts: Point[], tolerance: number): Point[] {
+  if (pts.length < 3) return pts.slice();
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  let maxD = 0;
+  let idx = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpDistance(pts[i], a, b);
+    if (d > maxD) {
+      maxD = d;
+      idx = i;
+    }
+  }
+  if (maxD <= tolerance) return [a, b];
+  const left = rdp(pts.slice(0, idx + 1), tolerance);
+  const right = rdp(pts.slice(idx), tolerance);
+  return left.slice(0, -1).concat(right);
+}
+
+/**
+ * Упростить полилинию перед отправкой в `end`: RDP + квантование + жёсткий кап
+ * (равномерная децимация с сохранением концов). Концы штриха сохраняются всегда.
+ */
+export function simplifyPath(
+  pts: Point[],
+  tolerance = SIMPLIFY_TOLERANCE,
+  maxPoints = MAX_PATH_POINTS,
+): Point[] {
+  if (pts.length <= 2) return pts.map((p) => quantize(p));
+
+  // Предварительная децимация очень длинных штрихов — бережём стек рекурсии RDP.
+  let src = pts;
+  if (src.length > 5000) {
+    const step = Math.ceil(src.length / 5000);
+    src = src.filter((_, i) => i % step === 0 || i === src.length - 1);
+  }
+
+  let out = rdp(src, tolerance).map((p) => quantize(p));
+
+  if (out.length > maxPoints) {
+    const step = (out.length - 1) / (maxPoints - 1);
+    const dec: Point[] = [];
+    for (let i = 0; i < maxPoints; i++) dec.push(out[Math.round(i * step)]);
+    out = dec;
+  }
+  return out;
+}
+
+/** Размер сообщения в байтах после кодирования (для метрик и проверок). */
+export function encodedSize(msg: AnnoMsg): number {
+  return encode(msg).length;
+}
+
 /** true, если op нужно слать надёжно (reliable), false — lossy (best-effort). */
 export function isReliable(op: Op): boolean {
   switch (op) {

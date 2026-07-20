@@ -225,5 +225,18 @@ public protocol CobrowseTransport: AnyObject {
     /// - Parameter topic: логический канал ("annotations", "control", "cursor", ...)
     /// - Parameter reliable: true = гарантированная доставка (аннотации),
     ///                       false = best-effort (курсор реалтайм)
-    func sendData(_ data: Data, topic: String, reliable: Bool) async throws
+    /// - Parameter destinationIdentities: кому доставить. Пустой массив = всем
+    ///   (broadcast). Адресная доставка нужна для ресинка: снапшот аннотаций
+    ///   уходит только тому оператору, который его запросил.
+    func sendData(_ data: Data,
+                  topic: String,
+                  reliable: Bool,
+                  destinationIdentities: [String]) async throws
+}
+
+public extension CobrowseTransport {
+    /// Broadcast-вариант: доставить всем участникам сессии.
+    func sendData(_ data: Data, topic: String, reliable: Bool) async throws {
+        try await sendData(data, topic: topic, reliable: reliable, destinationIdentities: [])
+    }
 }

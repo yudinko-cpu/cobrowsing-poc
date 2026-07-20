@@ -209,12 +209,21 @@ public final class LiveKitTransport: CobrowseTransport {
         }
     }
 
-    public func sendData(_ data: Data, topic: String, reliable: Bool) async throws {
+    public func sendData(_ data: Data,
+                         topic: String,
+                         reliable: Bool,
+                         destinationIdentities: [String]) async throws {
         guard connectionState == .connected else { throw TransportError.notConnected }
+        // Пустой массив destinationIdentities = broadcast всем (семантика LiveKit).
+        let targets = destinationIdentities.map { Participant.Identity(from: $0) }
         do {
             try await room.localParticipant.publish(
                 data: data,
-                options: DataPublishOptions(topic: topic, reliable: reliable)
+                options: DataPublishOptions(
+                    destinationIdentities: targets,
+                    topic: topic,
+                    reliable: reliable
+                )
             )
         } catch {
             throw TransportError.publishFailed(error.localizedDescription)

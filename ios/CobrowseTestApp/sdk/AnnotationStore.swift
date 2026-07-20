@@ -33,6 +33,11 @@ public final class AnnotationStore: ObservableObject {
     /// подключим в ANNO-2, когда транспорт отдаст identity локального участника.
     public var localIdentity: String?
 
+    /// Пришёл `sync-req` от оператора (аутентифицированная identity в параметре).
+    /// Клиент — канонический стор, поэтому именно он отвечает адресным
+    /// `sync-state`. Проводку делает CobrowseClient (ANNO-6).
+    public var onSyncRequest: ((String) -> Void)?
+
     private var expiryTask: Task<Void, Never>?
     private let pointerTtlMs: Double = 1000
     private let expiryTickNs: UInt64 = 100_000_000  // 0.1 c
@@ -55,7 +60,19 @@ public final class AnnotationStore: ObservableObject {
     public func handle(data: Data, topic: String, from identity: String?) {
         guard topic == AnnoProtocol.topic, var msg = AnnoCodec.decode(data) else { return }
         if let identity, !identity.isEmpty { msg.author = identity }
-        apply(msg)
+
+        switch msg.op {
+        case "sync-req":
+            // Оператор просит текущее состояние (позднее подключение / F5).
+            // Отвечает CobrowseClient — адресно, снапшотом (ANNO-6).
+            onSyncRequest?(msg.author)
+        case "sync-state":
+            // Клиент — сам канонический источник и снапшоты извне не принимает:
+            // иначе оператор мог бы подсунуть аннотации с чужим авторством.
+            break
+        default:
+            apply(msg)
+        }
     }
 
     /// Применить уже разобранное сообщение.
@@ -73,6 +90,12 @@ public final class AnnotationStore: ObservableObject {
     }
 
     // MARK: - Жизненный цикл overlay
+
+    /// Снапшот всех персистентных аннотаций (без эфемерных указок) —
+    /// тело ответа `sync-state`.
+    public func snapshot() -> [Annotation] {
+        state.snapshot()
+    }
 
     /// Полная очистка при снятии overlay (.ended / .error).
     public func reset() {
