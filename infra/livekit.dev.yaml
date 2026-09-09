@@ -38,7 +38,7 @@ logging:
 # Лимиты для dev — как в проде.
 room:
   empty_timeout: 300
-  max_participants: 10      # 1 клиент + до 8 агентов (co-viewing) + запас. См. livekit.yaml.
+  max_participants: 50      # Как в проде: лимита на агентов в backend нет. См. livekit.yaml.
   enabled_codecs:
     - mime: video/H264
     - mime: video/VP8

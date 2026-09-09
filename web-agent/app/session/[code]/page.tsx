@@ -774,12 +774,18 @@ const styles: Record<string, React.CSSProperties> = {
   header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1f2937' },
   liveBadge: { marginLeft: 12, color: '#f87171', fontSize: 12, fontWeight: 700 },
   endBtn: { background: '#dc2626', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 },
+  // maxHeight/overflowY — обязательны: лимита на число агентов в backend нет,
+  // поэтому список принципиально неограничен. Без ограничения по высоте
+  // popover уезжает за нижнюю границу viewer'а (height: 100vh) и хвост
+  // становится недостижим.
   rosterPopover: {
     position: 'absolute',
     top: 'calc(100% + 6px)',
     right: 0,
     zIndex: 10,
     minWidth: 200,
+    maxHeight: '60vh',
+    overflowY: 'auto',
     background: '#111827',
     border: '1px solid #374151',
     borderRadius: 8,

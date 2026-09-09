@@ -4,8 +4,9 @@
  * Endpoints:
  *   POST /session/create        — клиент (iOS) создаёт сессию, получает код и publisher-токен
  *   POST /agent/join            — агент входит по коду, получает subscriber-токен.
- *                                 Несколько агентов могут войти в одну сессию (co-viewing),
- *                                 до MAX_AGENTS_PER_SESSION.
+ *                                 Несколько агентов могут войти в одну сессию (co-viewing).
+ *                                 Лимита на число агентов нет — единственная верхняя
+ *                                 граница это room.max_participants в LiveKit.
  *   POST /session/end           — закрытие сессии (любой стороной)
  *   GET  /session/list          — список активных сессий (для dashboard агентов)
  *   GET  /health                — health check
@@ -19,7 +20,6 @@
 
 import express from 'express';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import Redis from 'ioredis';
 import pino from 'pino';
@@ -52,14 +52,6 @@ const LOG_LEVEL = required('LOG_LEVEL');
 
 const CODE_TTL_SECONDS = 10 * 60;       // 10 минут на ввод кода агентом
 const SESSION_TTL_SECONDS = 60 * 60;    // 1 час максимальная длительность
-
-// Сколько агентов одновременно пускаем в одну сессию.
-// Демо-фича «co-viewing»: несколько операторов смотрят один экран клиента.
-// Верхняя граница нужна, чтобы (а) случайно не переполнить комнату,
-// (б) держаться в пределах LiveKit room.max_participants (см. infra/livekit*.yaml:
-// max_participants=10 = 1 клиент + до 8 агентов + запас на reconnect-гонки).
-// Reclaim тем же agentId (F5, StrictMode) НЕ считается новым агентом.
-const MAX_AGENTS_PER_SESSION = 8;
 
 function required(name) {
   const v = process.env[name];
@@ -112,9 +104,8 @@ const roomService = new RoomServiceClient(LIVEKIT_INTERNAL_URL, API_KEY, API_SEC
 // ---- app ----
 const app = express();
 
-// CORS должен идти РАНЬШЕ json-парсера и rate-limit'а,
-// чтобы preflight OPTIONS уходил обратно с корректными заголовками
-// даже если тело запроса невалидное или лимит превышен.
+// CORS должен идти РАНЬШЕ json-парсера, чтобы preflight OPTIONS уходил
+// обратно с корректными заголовками даже если тело запроса невалидное.
 const corsOptions = {
   origin: buildOriginMatcher(CORS_ORIGIN),
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -129,16 +120,6 @@ app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '32kb' }));
 app.use(pinoHttp({ logger }));
-
-// Rate limiting: 30 запросов / минуту с IP. Чтобы код не подбирали брутфорсом.
-// skip для OPTIONS — иначе preflight может улететь в 429 и браузер откажет запросу.
-const limiter = rateLimit({
-  windowMs: 60_000,
-  max: 30,
-  standardHeaders: true,
-  skip: (req) => req.method === 'OPTIONS',
-});
-app.use(limiter);
 
 // ---- routes ----
 
@@ -205,14 +186,18 @@ app.post('/session/create', async (req, res) => {
  * Request:  { code: string, agentId: string }
  * Response: { roomName, livekitUrl, token, customerId, agentCount }
  *
- * Co-viewing: в одну сессию могут войти несколько агентов (до
- * MAX_AGENTS_PER_SESSION). Набор агентов хранится в code:{code}.agents —
- * map agentId → { joinedAt }. LiveKit сам разруливает много подписчиков в
- * комнате; identity участника = agentId, поэтому агенты должны иметь разные
- * agentId (их генерит фронт per-tab, см. web-agent getOrCreateAgentId).
+ * Co-viewing: в одну сессию могут войти несколько агентов. Набор агентов
+ * хранится в code:{code}.agents — map agentId → { joinedAt }. LiveKit сам
+ * разруливает много подписчиков в комнате; identity участника = agentId,
+ * поэтому агенты должны иметь разные agentId (их генерит фронт per-tab,
+ * см. web-agent getOrCreateAgentId).
+ *
+ * Лимита на число агентов здесь нет: демо-стенд не должен отказывать людям,
+ * которым дали ссылку. Единственная верхняя граница — room.max_participants
+ * в infra/livekit*.yaml, и она намеренно выставлена с большим запасом.
  *
  * Идемпотентно по (code, agentId):
- * - Новый agentId — добавляем в agents, если не превышен лимит; иначе 409 (full).
+ * - Новый agentId — добавляем в agents.
  * - Повторный вход с тем же agentId — reclaim: переизлучаем токен (та же
  *   identity, LiveKit валидно "заменит" участника), agents не растёт. Нужно
  *   для React StrictMode double-invoke, F5 в браузере, ретраев по сети.
@@ -242,15 +227,9 @@ app.post('/agent/join', async (req, res) => {
 
     const isReclaim = Boolean(agents[agentId]);
 
-    // Новый агент — проверяем лимит. Reclaim существующего лимит не трогает.
+    // Новый агент — просто добавляем, без проверки лимита.
+    // Reclaim существующего agentId набор не меняет.
     if (!isReclaim) {
-      if (Object.keys(agents).length >= MAX_AGENTS_PER_SESSION) {
-        logger.warn(
-          { code, agentId, current: Object.keys(agents).length, max: MAX_AGENTS_PER_SESSION },
-          'agent/join: session full'
-        );
-        return res.status(409).json({ error: 'session is full' });
-      }
       agents[agentId] = { joinedAt: Date.now() };
     }
 

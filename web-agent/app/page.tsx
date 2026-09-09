@@ -3,12 +3,21 @@
 /**
  * Главный экран агента.
  * - Ввод 6-значного кода для подключения к новой сессии
- * - Список активных сессий (auto-refresh каждые 5 сек)
+ * - Список активных сессий (auto-refresh, пауза на скрытой вкладке)
  */
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '../lib/api';
+
+/**
+ * Как часто обновляем список сессий.
+ *
+ * На демо дашборд открыт сразу у многих, а /session/list внутри делает N+1 в
+ * Redis (SMEMBERS + GET на каждую сессию), поэтому интервал намеренно
+ * неагрессивный, и на скрытой вкладке поллинг вообще молчит (см. useEffect).
+ */
+const POLL_INTERVAL_MS = 10_000;
 
 type Session = {
   roomName: string;
@@ -29,6 +38,10 @@ export default function AgentDashboard() {
   // Auto-refresh списка сессий
   useEffect(() => {
     const load = async () => {
+      // Скрытая вкладка ничего не показывает — незачем и запрашивать.
+      // document трогаем только внутри эффекта: страница 'use client', но
+      // Next всё равно рендерит её на сервере, где document'а нет.
+      if (document.visibilityState === 'hidden') return;
       try {
         const data = await apiFetch<{ sessions: Session[] }>('/session/list');
         setSessions(data.sessions || []);
@@ -36,9 +49,22 @@ export default function AgentDashboard() {
         // silently ignore — следующий interval попробует ещё раз
       }
     };
+
+    // При возврате на вкладку грузим сразу: иначе список выглядел бы
+    // замороженным до конца текущего интервала — ровно в тот момент,
+    // когда оператор на него смотрит.
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+
     load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
+    const id = setInterval(load, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   const handleJoin = (rawCode: string) => {

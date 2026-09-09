@@ -69,11 +69,11 @@
 
 - **Given** запущенный token-server и Redis **When** `POST /session/create` с пустым body **Then** ответ содержит поля `code` (6 цифр в формате `XXX-XXX`), `roomName`, `livekitUrl`, `token`, `expiresIn`
 - **Given** созданная сессия **When** проверить `redis-cli GET code:<code>` **Then** ключ существует с TTL ~600 сек
-- **Given** код существует в Redis **When** `POST /agent/join` с этим кодом и agentId **Then** ответ содержит валидный JWT-токен с теми же `roomName` и `livekitUrl`, в Redis записывается `claimedByAgentId`, TTL кода продлевается до длительности сессии
-- **Given** код уже заклаймлен agent'ом `A` **When** повторный `POST /agent/join` с тем же кодом и agentId `A` (StrictMode double-mount, F5, network retry) **Then** ответ `200` с валидным токеном (идемпотентно, LiveKit заменит участника по identity)
-- **Given** код заклаймлен agent'ом `A` **When** `POST /agent/join` с этим же кодом но agentId `B` **Then** ответ `409 {"error":"code already claimed by another agent"}`
+- **Given** код существует в Redis **When** `POST /agent/join` с этим кодом и agentId **Then** ответ содержит валидный JWT-токен с теми же `roomName` и `livekitUrl`, в Redis в `code:<code>.agents` появляется запись `agentId → { joinedAt }`, TTL кода продлевается до длительности сессии
+- **Given** в сессию уже вошёл агент `A` **When** повторный `POST /agent/join` с тем же кодом и agentId `A` (StrictMode double-mount, F5, network retry) **Then** ответ `200` с валидным токеном, `agentCount` не увеличивается (reclaim идемпотентен, LiveKit заменит участника по identity)
+- **Given** в сессию уже вошёл агент `A` **When** `POST /agent/join` с этим же кодом но agentId `B` **Then** ответ `200`: co-viewing, лимита на число агентов нет. Верхняя граница — только `room.max_participants` в LiveKit
 - **Given** недействительный код (123-456, которого нет в Redis) **When** `POST /agent/join` **Then** ответ `404`, в логи пишется warning
-- **Given** > 30 запросов с одного IP за минуту **When** следующий запрос **Then** ответ `429 Too Many Requests`
+- **Given** много запросов подряд с одного IP **When** следующий запрос **Then** ответ `200`: rate limiting снят, чтобы не мешать демо. Обоснование и последствия — `docs/security.md` §1.2, T2
 - **Given** `POST /session/end` с валидным roomName **When** **Then** LiveKit `deleteRoom` вызван, в Redis статус сессии `ended`, room удалён из `sessions:active`
 
 **Артефакты:** `backend/server.js`
