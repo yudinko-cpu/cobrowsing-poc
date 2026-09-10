@@ -39,8 +39,18 @@ import {
   CLICK_TTL_MS,
   MAX_CHAT_LEN,
   clampChatText,
+  CLIENT_PSEUDO_AUTHOR,
+  type ChatItem,
 } from './anno.ts';
-import { chatFromMsg, makeChatMsg, isChatOp, typingFromMsg, makeTypingMsg, TypingTracker } from './chat.ts';
+import {
+  chatFromMsg,
+  chatHistoryFromMsg,
+  makeChatMsg,
+  isChatOp,
+  typingFromMsg,
+  makeTypingMsg,
+  TypingTracker,
+} from './chat.ts';
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -483,6 +493,46 @@ test('TypingTracker: heartbeat не чаще интервала, стоп оди
 
 test('makeTypingMsg: конверт v/op/typing', () => {
   assert.deepEqual(makeTypingMsg('agent-a', false, 5), { v: ANNO_VERSION, op: 'typing', author: 'agent-a', ts: 5, typing: false });
+});
+
+// ── История чата (op chat-sync) ───────────────────────────────────────────────
+
+test('chat-sync: round-trip, reliable, isChatOp, не трогает аннотации', () => {
+  const msg = mk('chat-sync', CLIENT_PSEUDO_AUTHOR, {
+    history: [{ id: 'client:1', author: CLIENT_PSEUDO_AUTHOR, text: 'привет', ts: now }],
+  });
+  assert.deepEqual(decode(encode(msg)), msg);
+  assert.equal(isReliable('chat-sync'), true);
+  assert.equal(isChatOp('chat-sync'), true);
+  const s = newState();
+  apply(s, msg);
+  assert.equal(s.items.size, 0);
+});
+
+test('chatHistoryFromMsg: псевдо-автор телефона → identity отправителя, ключи как у живых', () => {
+  const msg = mk('chat-sync', CLIENT_PSEUDO_AUTHOR, {
+    history: [
+      { id: 'agent-a:1', author: 'agent-a', text: 'Здравствуйте', ts: 1 },
+      { id: 'client:1', author: CLIENT_PSEUDO_AUTHOR, text: '  Привет  ', ts: 2 },
+      { id: 'client:2', author: CLIENT_PSEUDO_AUTHOR, text: '   ', ts: 3 }, // пустой — пропускаем
+      { id: 42, author: 'agent-a', text: 'x', ts: 4 } as unknown as ChatItem, // битый — пропускаем
+    ],
+  });
+  const out = chatHistoryFromMsg(msg, 'customer-1');
+  assert.deepEqual(out, [
+    { key: 'agent-a|agent-a:1', author: 'agent-a', text: 'Здравствуйте', ts: 1 },
+    { key: 'customer-1|client:1', author: 'customer-1', text: 'Привет', ts: 2 },
+  ]);
+  // Ключ совпадает с ключом живого сообщения от того же телефона → дедуп сработает.
+  const live = chatFromMsg(mk('chat', CLIENT_PSEUDO_AUTHOR, { id: 'client:1', text: 'Привет' }), 'customer-1')!;
+  assert.equal(live.key, out[1].key);
+  // Без identity отправителя псевдо-автор остаётся как есть; ts без числа — из конверта.
+  const fb = chatHistoryFromMsg(mk('chat-sync', CLIENT_PSEUDO_AUTHOR, {
+    history: [{ id: 'client:9', author: CLIENT_PSEUDO_AUTHOR, text: 'x' } as unknown as ChatItem],
+  }));
+  assert.deepEqual(fb, [{ key: 'client|client:9', author: 'client', text: 'x', ts: now }]);
+  assert.deepEqual(chatHistoryFromMsg(mk('chat', 'a', { id: 'a:1', text: 'x' }), 'a'), []);
+  assert.deepEqual(chatHistoryFromMsg(mk('chat-sync', CLIENT_PSEUDO_AUTHOR, {}), 'a'), []);
 });
 
 console.log(`\n${passed} tests passed.`);

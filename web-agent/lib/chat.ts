@@ -3,19 +3,23 @@
  *
  * Едет тем же LiveKit data-топиком (`ANNO_TOPIC`) и тем же конвертом `AnnoMsg`,
  * что клики/штрихи/стрелки:
- *   • `op: 'chat'`   — сообщение: `id` + `text`;
- *   • `op: 'typing'` — «печатает»: `typing: true` (heartbeat) | `false` (перестал).
- * Оба — не состояние аннотаций (в `apply()` — no-op) и не входят в
- * `sync-state`: истории нет by design, всё живёт в памяти одной сессии.
+ *   • `op: 'chat'`      — сообщение: `id` + `text`;
+ *   • `op: 'typing'`    — «печатает»: `typing: true` (heartbeat) | `false` (перестал);
+ *   • `op: 'chat-sync'` — история сессии: `history: [{id, author, text, ts}]`.
+ *     Телефон (канонический стор, как у аннотаций) шлёт её запросившему
+ *     оператору в ответ на `sync-req` пакетами, строго по порядку.
+ * Все три — не состояние аннотаций (в `apply()` — no-op) и в `sync-state` не
+ * входят. История живёт в памяти телефона ровно столько, сколько сессия, и
+ * никуда не пишется.
  *
  * Зеркало iOS-стороны — `ios/CobrowseTestApp/sdk/ChatStore.swift`
  * (санитизация, ключ дедупа, троттлинг и TTL «печатает» обязаны совпадать).
  */
 
-import { ANNO_VERSION, clampChatText, type AnnoMsg, type Op } from './anno';
+import { ANNO_VERSION, CLIENT_PSEUDO_AUTHOR, clampChatText, type AnnoMsg, type ChatItem, type Op } from './anno';
 
 /** Ops чата — не аннотации; AnnotationOverlay пропускает их до гейта прав. */
-const CHAT_OPS: ReadonlySet<Op> = new Set<Op>(['chat', 'typing']);
+const CHAT_OPS: ReadonlySet<Op> = new Set<Op>(['chat', 'typing', 'chat-sync']);
 
 export function isChatOp(op: Op): boolean {
   return CHAT_OPS.has(op);
@@ -55,6 +59,26 @@ export function makeChatMsg(author: string, id: string, raw: string, ts = Date.n
   const text = clampChatText(raw);
   if (!text) return null;
   return { v: ANNO_VERSION, op: 'chat', author, ts, id, text };
+}
+
+/**
+ * Разобрать пакет истории `chat-sync` в сообщения стора. Битые и пустые
+ * элементы пропускаются. Свои сообщения телефон помечает псевдо-автором —
+ * подставляем под него identity отправителя (телефона), чтобы ключ дедупа
+ * совпал с тем, что панель посчитала для живого сообщения от него же.
+ * Гейт «только от Customer» — на вызывающей стороне (как у sync-state).
+ */
+export function chatHistoryFromMsg(msg: AnnoMsg, senderIdentity?: string): ChatMessage[] {
+  if (msg.op !== 'chat-sync' || !Array.isArray(msg.history)) return [];
+  const out: ChatMessage[] = [];
+  for (const it of msg.history) {
+    if (!it || typeof it.id !== 'string' || typeof it.author !== 'string') continue;
+    const text = clampChatText(typeof it.text === 'string' ? it.text : '');
+    if (!text) continue;
+    const author = it.author === CLIENT_PSEUDO_AUTHOR && senderIdentity ? senderIdentity : it.author;
+    out.push({ key: `${author}|${it.id}`, author, text, ts: typeof it.ts === 'number' ? it.ts : msg.ts });
+  }
+  return out;
 }
 
 // ── «Печатает» ───────────────────────────────────────────────────────────────

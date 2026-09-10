@@ -3,15 +3,17 @@
 /**
  * ChatPanel — мессенджер оператора с клиентом (правая колонка страницы сессии).
  *
- * Едет тем же data-топиком и конвертом, что аннотации (`op: 'chat'` и
- * `op: 'typing'`, см. lib/chat.ts). Второй независимый слушатель
+ * Едет тем же data-топиком и конвертом, что аннотации (`op: 'chat'`,
+ * `'typing'`, `'chat-sync'`, см. lib/chat.ts). Второй независимый слушатель
  * RoomEvent.DataReceived рядом с AnnotationOverlay: Room — TypedEmitter, каждый
  * `on` получает все события, `off(fn)` снимает только свой. AnnotationOverlay на
  * ops чата делает ранний выход (до гейта прав — клиент вправе их слать), сюда
  * доходит всё остальное.
  *
- * Состояние — компонентное: теряется на unmount/F5. Так и задумано: истории
- * нет, всё живёт в рамках одной сессии, в sync-state чат не входит.
+ * Состояние — компонентное и теряется на unmount/F5, но это не страшно:
+ * AnnotationOverlay на коннекте шлёт sync-req, а телефон (канонический стор
+ * сессии) отвечает историей чата пакетами chat-sync — поздний оператор и
+ * вкладка после F5 видят всю переписку. Дедуп по ключу identity|id.
  *
  * Свои сообщения применяем оптимистично: LiveKit не эхоит data отправителю.
  * «Печатает»: heartbeat при изменении черновика (троттлинг в TypingTracker),
@@ -26,6 +28,7 @@ import {
   TYPING_TTL_MS,
   TypingTracker,
   chatFromMsg,
+  chatHistoryFromMsg,
   makeChatMsg,
   makeTypingMsg,
   typingFromMsg,
@@ -66,6 +69,12 @@ export function ChatPanel() {
   const seenRef = useRef(new Set<string>());
   const typingTrackerRef = useRef(new TypingTracker());
   const listRef = useRef<HTMLDivElement>(null);
+  // Сколько элементов истории уже вставлено в начало списка: следующий пакет
+  // chat-sync встаёт после них, но перед живыми сообщениями (они всегда новее).
+  const historyCountRef = useRef(0);
+  // Своя identity для слушателя, который подписан один раз (deps: [room]).
+  const myIdRef = useRef(myId);
+  myIdRef.current = myId;
 
   // ── Отправка на data-канал ──────────────────────────────────────────────────
   const publish = (msg: AnnoMsg, what: string) => {
@@ -100,6 +109,29 @@ export function ChatPanel() {
         setMessages((m) => [...m, { ...cm, isMine: false, isCustomer }]);
         // Сообщение пришло — «печатает» этого автора снимаем сразу.
         setTyping((t) => omit(t, cm.author));
+        return;
+      }
+
+      if (msg.op === 'chat-sync') {
+        // История — только от телефона (канонический стор), как sync-state:
+        // иначе оператор мог бы подсунуть переписку с чужим авторством.
+        if (!isCustomer) {
+          console.warn('[chat] chat-sync не от клиента отброшен', { from: participant?.identity });
+          return;
+        }
+        const items = chatHistoryFromMsg(msg, participant?.identity).filter((it) => !seenRef.current.has(it.key));
+        if (items.length === 0) return;
+        for (const it of items) seenRef.current.add(it.key);
+        const me = myIdRef.current;
+        const entries: Entry[] = items.map((it) => ({
+          ...it,
+          isMine: it.author === me,
+          isCustomer: it.author === participant?.identity,
+        }));
+        // Индекс вставки считаем вне updater'а: в StrictMode React зовёт его дважды.
+        const at = historyCountRef.current;
+        historyCountRef.current += entries.length;
+        setMessages((m) => [...m.slice(0, at), ...entries, ...m.slice(at)]);
         return;
       }
 

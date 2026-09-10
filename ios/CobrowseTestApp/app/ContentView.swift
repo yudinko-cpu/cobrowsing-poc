@@ -94,7 +94,7 @@ struct ContentView: View {
             } else {
                 overlayHost.hide()
                 client.annotations.reset()
-                client.chat.reset()   // истории чата нет — живёт в рамках сессии
+                client.chat.reset()   // история чата живёт только в рамках сессии
             }
         }
     }

@@ -32,6 +32,11 @@ public enum AnnoProtocol {
     /// Максимальная длина сообщения чата поддержки (op "chat"). Отдельно от
     /// maxTextLen: подпись на экране и реплика в чате — разные вещи.
     public static let maxChatLen = 1000
+    /// Псевдо-автор в сообщениях телефона: своей identity клиент не знает, а
+    /// получатели перезаписывают author на аутентифицированную identity
+    /// отправителя. Как есть он виден только в элементах истории chat-sync —
+    /// web подставляет под него identity телефона (CLIENT_PSEUDO_AUTHOR в anno.ts).
+    public static let clientPseudoAuthor = "client"
 }
 
 // MARK: - Wire-типы (значения строковые для forward-compat — как в TS union'ах)
@@ -43,7 +48,7 @@ public typealias AnnoPoint = [Double] // [nx, ny], каждая в [0..1]
 /// nil-поля опускаются (как undefined в JSON.stringify).
 public struct AnnoMsg: Codable, Equatable {
     public var v: Int
-    public var op: String          // add|append|end|remove|clear|pointer|click|chat|typing|sync-req|sync-state
+    public var op: String          // add|append|end|remove|clear|pointer|click|chat|typing|chat-sync|sync-req|sync-state
     public var author: String      // participant identity
     public var ts: Double
     public var id: String?         // "author:counter"
@@ -61,6 +66,7 @@ public struct AnnoMsg: Codable, Equatable {
     public var scope: String?      // clear: own|all
     public var items: [Annotation]? // sync-state
     public var typing: Bool?       // typing: true — печатает (heartbeat), false — перестал
+    public var history: [ChatItem]? // chat-sync: история чата сессии (пакетами, по порядку)
 
     public init(v: Int = AnnoProtocol.version,
                 op: String,
@@ -80,12 +86,13 @@ public struct AnnoMsg: Codable, Equatable {
                 fill: Bool? = nil,
                 scope: String? = nil,
                 items: [Annotation]? = nil,
-                typing: Bool? = nil) {
+                typing: Bool? = nil,
+                history: [ChatItem]? = nil) {
         self.v = v; self.op = op; self.author = author; self.ts = ts
         self.id = id; self.kind = kind; self.color = color; self.w = w
         self.pts = pts; self.from = from; self.to = to; self.at = at
         self.text = text; self.size = size; self.shape = shape; self.fill = fill
-        self.scope = scope; self.items = items; self.typing = typing
+        self.scope = scope; self.items = items; self.typing = typing; self.history = history
     }
 }
 
@@ -113,6 +120,19 @@ public struct Annotation: Codable, Equatable {
         self.id = id; self.author = author; self.kind = kind; self.color = color; self.ts = ts
         self.w = w; self.pts = pts; self.from = from; self.to = to; self.at = at
         self.text = text; self.size = size; self.shape = shape; self.fill = fill
+    }
+}
+
+/// Элемент истории чата сессии (chat-sync). Форма — как у сообщения `chat`:
+/// id на проводе, автор (identity оператора или псевдо-автор телефона), текст, ts.
+public struct ChatItem: Codable, Equatable {
+    public var id: String
+    public var author: String
+    public var text: String
+    public var ts: Double
+
+    public init(id: String, author: String, text: String, ts: Double) {
+        self.id = id; self.author = author; self.text = text; self.ts = ts
     }
 }
 
@@ -344,9 +364,10 @@ public final class AnnoState {
             // адресно запросившему). Здесь состояние не меняется.
             break
 
-        case "chat", "typing":
-            // Чат и «печатает» — не состояние аннотаций: живут в ChatStore и в
-            // sync-state не входят (истории нет). Здесь — осознанный no-op.
+        case "chat", "typing", "chat-sync":
+            // Ops чата (сообщение, «печатает», история) — не состояние аннотаций:
+            // живут в ChatStore, в sync-state не входят — историю телефон шлёт
+            // отдельным chat-sync. Здесь — осознанный no-op.
             break
 
         default:
@@ -403,7 +424,7 @@ public extension AnnoProtocol {
     static func isReliable(op: String) -> Bool {
         switch op {
         case "pointer", "append": return false // высокочастотные, потеря незаметна
-        default: return true                    // add/end/remove/clear/click/chat/typing/sync-* критичны
+        default: return true                    // add/end/remove/clear/click/chat/typing/chat-sync/sync-* критичны
         }
     }
 }

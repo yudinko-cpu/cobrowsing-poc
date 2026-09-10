@@ -32,6 +32,14 @@ export const MAX_TEXT_LEN = 200;
  */
 export const MAX_CHAT_LEN = 1000;
 
+/**
+ * Псевдо-автор в сообщениях телефона: своей identity клиент не знает, а
+ * получатели перезаписывают author на аутентифицированную identity отправителя.
+ * Как есть он виден только в элементах истории chat-sync — там его подставляет
+ * под identity телефона chatHistoryFromMsg. Зеркало AnnoProtocol.clientPseudoAuthor.
+ */
+export const CLIENT_PSEUDO_AUTHOR = 'client';
+
 // ── Типы ─────────────────────────────────────────────────────────────────────
 
 export type Op =
@@ -44,6 +52,7 @@ export type Op =
   | 'click' // клик указкой — эфемерная расходящаяся «волна»
   | 'chat' // сообщение чата поддержки — не аннотация (см. lib/chat.ts)
   | 'typing' // «печатает» в чате поддержки: heartbeat / стоп — тоже не аннотация
+  | 'chat-sync' // история чата сессии — ответ телефона на sync-req (см. lib/chat.ts)
   | 'sync-req' // запрос полного состояния (позднее подключение / реконнект)
   | 'sync-state'; // ответ с полным снапшотом
 
@@ -78,6 +87,7 @@ export interface AnnoMsg {
   scope?: ClearScope; // clear
   items?: Annotation[]; // sync-state: полный снапшот
   typing?: boolean; // typing: true — печатает (heartbeat), false — перестал
+  history?: ChatItem[]; // chat-sync: история чата сессии (пакетами, по порядку)
 }
 
 /** Сохранённая аннотация в сторе (персистентная, без эфемерных указок). */
@@ -111,6 +121,14 @@ export interface Pointer {
  * Форма совпадает с указкой; отличается только временем жизни и рендером.
  */
 export type Click = Pointer;
+
+/** Элемент истории чата сессии (chat-sync): форма — как у сообщения chat. */
+export interface ChatItem {
+  id: string; // id на проводе ("author:counter")
+  author: string; // identity оператора или CLIENT_PSEUDO_AUTHOR для сообщений телефона
+  text: string;
+  ts: number;
+}
 
 // ── Кодек ────────────────────────────────────────────────────────────────────
 
@@ -367,9 +385,10 @@ export function apply(
       return;
     case 'chat':
     case 'typing':
-      // Чат и «печатает» — не состояние аннотаций: живут в своём сторе
-      // (ChatPanel / ChatStore) и в sync-state не входят (истории нет).
-      // Здесь — осознанный no-op.
+    case 'chat-sync':
+      // Ops чата (сообщение, «печатает», история) — не состояние аннотаций:
+      // живут в своём сторе (ChatPanel / ChatStore), в sync-state не входят —
+      // историю телефон шлёт отдельным chat-sync. Здесь — осознанный no-op.
       return;
   }
 }
@@ -547,7 +566,7 @@ export function isReliable(op: Op): boolean {
     case 'append':
       return false; // высокочастотные; потеря отдельного апдейта незаметна
     default:
-      // add/end/remove/clear/click/chat/sync-* — критично не потерять;
+      // add/end/remove/clear/click/chat/chat-sync/sync-* — критично не потерять;
       // typing — редкий, а порядок «true → false» важен, lossy его не гарантирует.
       return true;
   }

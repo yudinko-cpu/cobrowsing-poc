@@ -76,10 +76,10 @@ public final class AnnotationStore: ObservableObject {
             // Клиент — сам канонический источник и снапшоты извне не принимает:
             // иначе оператор мог бы подсунуть аннотации с чужим авторством.
             break
-        case "chat", "typing":
-            // Ops чата поддержки (сообщение, «печатает») — не аннотации; их
-            // принимает ChatStore (CobrowseClient.didReceiveData маршрутизирует
-            // те же байты и туда).
+        case "chat", "typing", "chat-sync":
+            // Ops чата поддержки (сообщение, «печатает», история) — не аннотации;
+            // их принимает ChatStore (CobrowseClient.didReceiveData маршрутизирует
+            // те же байты и туда), историю шлёт сам телефон.
             break
         default:
             apply(msg)

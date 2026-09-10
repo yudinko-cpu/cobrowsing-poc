@@ -74,9 +74,9 @@ public final class CobrowseClient: ObservableObject {
     public let chat = ChatStore()
 
     /// Счётчик id своих сообщений чата: "client:1", "client:2", … Псевдо-автор
-    /// "client" — как в sendSyncState: получатель перезапишет author на
-    /// аутентифицированную identity и дедупит по `identity|id`.
-    private let chatIdGen = AnnoIdGen(author: "client")
+    /// (AnnoProtocol.clientPseudoAuthor) — как в sendSyncState: получатель
+    /// перезапишет author на аутентифицированную identity и дедупит по `identity|id`.
+    private let chatIdGen = AnnoIdGen(author: AnnoProtocol.clientPseudoAuthor)
 
     /// Троттлинг «печатает» на отправителе (см. TypingTracker в ChatStore.swift).
     private var typingTracker = TypingTracker()
@@ -108,11 +108,12 @@ public final class CobrowseClient: ObservableObject {
         self.urlSession = urlSession
         self.transport.delegate = self
 
-        // ANNO-6: клиент — канонический стор аннотаций. Когда оператор
+        // ANNO-6: клиент — канонический стор аннотаций и чата. Когда оператор
         // подключается позже (или после F5) и просит ресинк — отвечаем ему
-        // адресно полным снапшотом.
+        // адресно полным снапшотом аннотаций и историей переписки.
         self.annotations.onSyncRequest = { [weak self] requester in
             self?.sendSyncState(to: requester)
+            self?.sendChatHistory(to: requester)
         }
     }
 
@@ -124,7 +125,7 @@ public final class CobrowseClient: ObservableObject {
             // Поле author для sync-state не используется reducer'ом: авторство
             // несёт каждый item. Получатель всё равно перезапишет его на
             // аутентифицированную identity отправителя.
-            author: "client",
+            author: AnnoProtocol.clientPseudoAuthor,
             ts: Date().timeIntervalSince1970 * 1000,
             items: annotations.snapshot()
         )
@@ -136,6 +137,35 @@ public final class CobrowseClient: ObservableObject {
                 reliable: true,
                 destinationIdentities: [requester]
             )
+        }
+    }
+
+    /// Отправить запросившему оператору историю чата сессии (ответ на sync-req,
+    /// вместе с sync-state). Телефон — канонический стор и для чата: поздно
+    /// подключившийся или обновивший вкладку оператор видит всю переписку.
+    /// Пакетами по бюджету байт и строго по порядку — все в одном Task, иначе
+    /// отдельные Task'и могли бы обогнать друг друга.
+    private func sendChatHistory(to requester: String) {
+        let items = chat.historyItems()
+        guard !items.isEmpty else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let packets = ChatStore.chunkHistory(items).compactMap { batch in
+            AnnoCodec.encode(AnnoMsg(
+                op: "chat-sync",
+                author: AnnoProtocol.clientPseudoAuthor,
+                ts: now,
+                history: batch
+            ))
+        }
+        Task {
+            for data in packets {
+                try? await self.transport.sendData(
+                    data,
+                    topic: AnnoProtocol.topic,
+                    reliable: true,
+                    destinationIdentities: [requester]
+                )
+            }
         }
     }
 
@@ -300,7 +330,7 @@ public final class CobrowseClient: ObservableObject {
 
         let id = chatIdGen.next()
         let ts = Date().timeIntervalSince1970 * 1000
-        let msg = AnnoMsg(op: "chat", author: "client", ts: ts, id: id, text: text)
+        let msg = AnnoMsg(op: "chat", author: AnnoProtocol.clientPseudoAuthor, ts: ts, id: id, text: text)
         guard let data = AnnoCodec.encode(msg) else { return }
 
         chat.appendLocal(text: text, id: id, ts: ts)
@@ -325,7 +355,7 @@ public final class CobrowseClient: ObservableObject {
         guard case .streaming = state else { return }
         let now = Date().timeIntervalSince1970 * 1000
         guard let flag = typingTracker.onDraftChange(nonEmpty: nonEmpty, nowMs: now) else { return }
-        let msg = AnnoMsg(op: "typing", author: "client", ts: now, typing: flag)
+        let msg = AnnoMsg(op: "typing", author: AnnoProtocol.clientPseudoAuthor, ts: now, typing: flag)
         guard let data = AnnoCodec.encode(msg) else { return }
         Task {
             // Best-effort: потерянный «стоп» подстрахует TTL на получателе.

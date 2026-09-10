@@ -5,9 +5,13 @@
 //  Стор чата поддержки на клиенте. Сообщения и «печатает» едут тем же
 //  data-топиком и тем же конвертом `AnnoMsg`, что аннотации (`op: "chat"` —
 //  id + text; `op: "typing"` — typing: true/false), но состоянием аннотаций НЕ
-//  являются: AnnotationStore их пропускает, в sync-state они не входят. Истории
-//  нет by design — всё живёт в памяти одной сессии и сбрасывается хостом вместе
-//  с overlay (ContentView → reset()).
+//  являются: AnnotationStore их пропускает, в sync-state они не входят.
+//
+//  Телефон — канонический стор сессии и для чата (как для аннотаций): история
+//  живёт здесь в памяти, никуда не пишется и по sync-req уезжает запросившему
+//  оператору пакетами `chat-sync` (CobrowseClient.sendChatHistory) — поздний
+//  оператор и вкладка после F5 видят всю переписку. Сбрасывается хостом вместе
+//  с overlay по концу сессии (ContentView → reset()).
 //
 //  Наполняется из транспорта (CobrowseClient.didReceiveData → handle()),
 //  своё сообщение добавляется оптимистично из CobrowseClient.sendChatMessage.
@@ -24,15 +28,18 @@ import Combine
 public struct ChatMessage: Identifiable, Equatable {
     /// Ключ дедупа `"<author>|<wire id>"`; author — аутентифицированная identity.
     public let id: String
-    /// Identity оператора; для своих сообщений — псевдо-автор "client".
+    /// Id на проводе ("author:counter") — нужен, чтобы отдать историю (chat-sync)
+    /// с теми же id, по которым операторы дедупят живые сообщения.
+    public let wireId: String
+    /// Identity оператора; для своих сообщений — AnnoProtocol.clientPseudoAuthor.
     public let author: String
     public let text: String
     /// Миллисекунды с эпохи, как `AnnoMsg.ts`.
     public let ts: Double
     public let isMine: Bool
 
-    public init(id: String, author: String, text: String, ts: Double, isMine: Bool) {
-        self.id = id; self.author = author; self.text = text; self.ts = ts; self.isMine = isMine
+    public init(id: String, wireId: String, author: String, text: String, ts: Double, isMine: Bool) {
+        self.id = id; self.wireId = wireId; self.author = author; self.text = text; self.ts = ts; self.isMine = isMine
     }
 }
 
@@ -84,9 +91,10 @@ public final class ChatStore: ObservableObject {
         switch msg.op {
         case "chat":
             guard let text = Self.sanitize(msg.text) else { return }
-            let key = "\(msg.author)|\(msg.id ?? String(msg.ts))"
+            let wireId = msg.id ?? String(msg.ts)
+            let key = "\(msg.author)|\(wireId)"
             guard seen.insert(key).inserted else { return }
-            messages.append(ChatMessage(id: key, author: msg.author, text: text, ts: msg.ts, isMine: false))
+            messages.append(ChatMessage(id: key, wireId: wireId, author: msg.author, text: text, ts: msg.ts, isMine: false))
             if !isOpen { unreadCount += 1 }
             // Сообщение пришло — «печатает» этого автора снимаем сразу.
             typing.removeValue(forKey: msg.author)
@@ -107,9 +115,43 @@ public final class ChatStore: ObservableObject {
     /// Оптимистичное добавление своего сообщения: LiveKit не возвращает
     /// отправителю его же data, поэтому применяем локально сразу.
     public func appendLocal(text: String, id: String, ts: Double) {
-        let key = "client|\(id)"
+        let author = AnnoProtocol.clientPseudoAuthor
+        let key = "\(author)|\(id)"
         seen.insert(key)
-        messages.append(ChatMessage(id: key, author: "client", text: text, ts: ts, isMine: true))
+        messages.append(ChatMessage(id: key, wireId: id, author: author, text: text, ts: ts, isMine: true))
+    }
+
+    // MARK: - История для chat-sync
+
+    /// Бюджет одного пакета chat-sync в байтах. Практический потолок data-пакета
+    /// LiveKit — 15 КБ (MAX_PACKET_BYTES в anno.ts); запас — на JSON-экранирование
+    /// и конверт.
+    public nonisolated static let historyBatchBytes = 12_000
+
+    /// История сессии в порядке поступления — тело пакетов chat-sync.
+    public func historyItems() -> [ChatItem] {
+        messages.map { ChatItem(id: $0.wireId, author: $0.author, text: $0.text, ts: $0.ts) }
+    }
+
+    /// Разбить историю на пакеты по бюджету байт: оценка по UTF-8 длинам полей
+    /// плюс накладные JSON на элемент. Порядок сохраняется; один элемент всегда
+    /// влезает (текст ограничен maxChatLen).
+    public static func chunkHistory(_ items: [ChatItem], maxBytes: Int = historyBatchBytes) -> [[ChatItem]] {
+        var out: [[ChatItem]] = []
+        var batch: [ChatItem] = []
+        var size = 0
+        for item in items {
+            let estimate = 48 + item.id.utf8.count + item.author.utf8.count + item.text.utf8.count
+            if !batch.isEmpty && size + estimate > maxBytes {
+                out.append(batch)
+                batch = []
+                size = 0
+            }
+            batch.append(item)
+            size += estimate
+        }
+        if !batch.isEmpty { out.append(batch) }
+        return out
     }
 
     /// Оператор отключился — снять его «печатает» (сообщения остаются).
@@ -123,7 +165,7 @@ public final class ChatStore: ObservableObject {
         unreadCount = 0
     }
 
-    /// Полная очистка по завершении сессии (истории нет by design).
+    /// Полная очистка по завершении сессии (история живёт только в рамках сессии).
     public func reset() {
         messages.removeAll()
         seen.removeAll()
