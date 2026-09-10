@@ -35,7 +35,7 @@ struct SupportFAB: View {
     private let tapSlop: CGFloat = 8
     /// REC-бейдж и шестерёнка настроек видео живут сверху.
     private let topClearance: CGFloat = 52
-    /// Таб-бар снизу — та же цифра, что у DEBUG-кнопки в ContentView.
+    /// Таб-бар снизу (на iOS 26 плавающий) — с запасом.
     private let bottomClearance: CGFloat = 80
 
     var body: some View {
@@ -53,8 +53,15 @@ struct SupportFAB: View {
                     // конкурируют, а minimumDistance: 0 + порог по сдвигу
                     // детерминирован. Жест — на самом кружке (до .position),
                     // иначе прозрачная область вокруг ничего не ловит.
+                    //
+                    // coordinateSpace: .global обязателен. В .local система
+                    // координат жеста едет вместе с кружком, который мы сами
+                    // двигаем через .position: на каждом событии translation
+                    // «обнуляется», кнопка мечется между старой и новой точкой
+                    // и еле ползёт за пальцем. В глобальных координатах сдвиг
+                    // считается от неподвижного начала касания.
                     .gesture(
-                        DragGesture(minimumDistance: 0)
+                        DragGesture(minimumDistance: 0, coordinateSpace: .global)
                             .updating($drag) { value, state, _ in
                                 state = value.translation
                             }
@@ -87,6 +94,8 @@ struct SupportFAB: View {
 
     // MARK: - Вид
 
+    private var isTyping: Bool { !chat.typing.isEmpty }
+
     private var fab: some View {
         Image(systemName: "bubble.left.and.bubble.right.fill")
             .font(.system(size: 22, weight: .semibold))
@@ -107,15 +116,37 @@ struct SupportFAB: View {
                         .offset(x: 4, y: -4)
                 }
             }
+            // «Оператор печатает»: белая капсула с бегущими точками у нижнего
+            // края — как всплывающий пузырь ответа. Бейдж непрочитанных при
+            // этом остаётся сверху справа, за место они не спорят.
+            .overlay(alignment: .bottom) {
+                if isTyping {
+                    TypingDots(color: .black.opacity(0.75), dotSize: 5, spacing: 2.5)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(.white))
+                        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+                        .offset(y: 7)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isTyping)
             .contentShape(Circle())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Чат с поддержкой")
-            .accessibilityValue(chat.unreadCount > 0 ? "\(chat.unreadCount) непрочитанных" : "")
+            .accessibilityValue(accessibilityValueText)
             .accessibilityHint("Открывает чат. Перетащите, чтобы переместить кнопку.")
             .accessibilityAddTraits(.isButton)
             // VoiceOver активирует элемент двойным тапом — DragGesture его не
             // получает, поэтому отдельное default-действие.
             .accessibilityAction { onTap() }
+    }
+
+    private var accessibilityValueText: String {
+        var parts: [String] = []
+        if chat.unreadCount > 0 { parts.append("\(chat.unreadCount) непрочитанных") }
+        if isTyping { parts.append("оператор печатает") }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: - Геометрия

@@ -43,6 +43,7 @@ export type Op =
   | 'pointer' // эфемерная лазерная указка
   | 'click' // клик указкой — эфемерная расходящаяся «волна»
   | 'chat' // сообщение чата поддержки — не аннотация (см. lib/chat.ts)
+  | 'typing' // «печатает» в чате поддержки: heartbeat / стоп — тоже не аннотация
   | 'sync-req' // запрос полного состояния (позднее подключение / реконнект)
   | 'sync-state'; // ответ с полным снапшотом
 
@@ -76,6 +77,7 @@ export interface AnnoMsg {
   fill?: boolean; // shape: полупрозрачная заливка
   scope?: ClearScope; // clear
   items?: Annotation[]; // sync-state: полный снапшот
+  typing?: boolean; // typing: true — печатает (heartbeat), false — перестал
 }
 
 /** Сохранённая аннотация в сторе (персистентная, без эфемерных указок). */
@@ -364,8 +366,10 @@ export function apply(
       // Обрабатывается на транспортном слое (клиент отвечает sync-state).
       return;
     case 'chat':
-      // Чат — не состояние аннотаций: живёт в своём сторе (ChatPanel / ChatStore)
-      // и в sync-state не входит (истории нет). Здесь — осознанный no-op.
+    case 'typing':
+      // Чат и «печатает» — не состояние аннотаций: живут в своём сторе
+      // (ChatPanel / ChatStore) и в sync-state не входят (истории нет).
+      // Здесь — осознанный no-op.
       return;
   }
 }
@@ -543,6 +547,8 @@ export function isReliable(op: Op): boolean {
     case 'append':
       return false; // высокочастотные; потеря отдельного апдейта незаметна
     default:
-      return true; // add/end/remove/clear/click/chat/sync-* — критично не потерять
+      // add/end/remove/clear/click/chat/sync-* — критично не потерять;
+      // typing — редкий, а порядок «true → false» важен, lossy его не гарантирует.
+      return true;
   }
 }

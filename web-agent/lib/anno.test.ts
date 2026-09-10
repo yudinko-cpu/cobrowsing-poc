@@ -40,7 +40,7 @@ import {
   MAX_CHAT_LEN,
   clampChatText,
 } from './anno.ts';
-import { chatFromMsg, makeChatMsg } from './chat.ts';
+import { chatFromMsg, makeChatMsg, isChatOp, typingFromMsg, makeTypingMsg, TypingTracker } from './chat.ts';
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -442,6 +442,47 @@ test('makeChatMsg: null на пустом, иначе конверт v/op/id/tex
   assert.equal(makeChatMsg('agent-a', 'agent-a:1', '   '), null);
   const msg = makeChatMsg('agent-a', 'agent-a:1', ' привет ', 123)!;
   assert.deepEqual(msg, { v: ANNO_VERSION, op: 'chat', author: 'agent-a', ts: 123, id: 'agent-a:1', text: 'привет' });
+});
+
+// ── «Печатает» (op typing) ────────────────────────────────────────────────────
+
+test('typing: round-trip, reliable, не трогает аннотации, isChatOp', () => {
+  const msg = mk('typing', 'agent-a', { typing: true });
+  assert.deepEqual(decode(encode(msg)), msg);
+  assert.equal(isReliable('typing'), true);
+  const s = newState();
+  apply(s, msg);
+  assert.equal(s.items.size + s.pointers.size + s.clicks.size, 0);
+  assert.equal(isChatOp('typing'), true);
+  assert.equal(isChatOp('chat'), true);
+  assert.equal(isChatOp('add'), false);
+});
+
+test('typingFromMsg: автор из identity, флаг только при typing === true', () => {
+  const on = typingFromMsg(mk('typing', 'spoofed', { typing: true }), 'customer-1')!;
+  assert.deepEqual(on, { author: 'customer-1', typing: true, ts: now });
+  const off = typingFromMsg(mk('typing', 'agent-b', { typing: false }))!;
+  assert.equal(off.author, 'agent-b');
+  assert.equal(off.typing, false);
+  assert.equal(typingFromMsg(mk('typing', 'a', {}), 'a')!.typing, false);
+  assert.equal(typingFromMsg(mk('chat', 'a', { id: 'a:1', text: 'x' }), 'a'), null);
+});
+
+test('TypingTracker: heartbeat не чаще интервала, стоп один раз, reset', () => {
+  const t = new TypingTracker(2000);
+  assert.equal(t.onDraftChange(true, 0), true); // первый символ — сразу
+  assert.equal(t.onDraftChange(true, 500), null); // внутри интервала — тишина
+  assert.equal(t.onDraftChange(true, 2000), true); // heartbeat
+  assert.equal(t.onDraftChange(false, 2100), false); // черновик опустел — стоп
+  assert.equal(t.onDraftChange(false, 2200), null); // повторно не шлём
+  assert.equal(t.onDraftChange(true, 2300), true); // снова печатает
+  t.reset(); // сообщение отправлено
+  assert.equal(t.onDraftChange(false, 2400), null); // стоп не нужен
+  assert.equal(t.onDraftChange(true, 2500), true);
+});
+
+test('makeTypingMsg: конверт v/op/typing', () => {
+  assert.deepEqual(makeTypingMsg('agent-a', false, 5), { v: ANNO_VERSION, op: 'typing', author: 'agent-a', ts: 5, typing: false });
 });
 
 console.log(`\n${passed} tests passed.`);

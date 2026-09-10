@@ -146,7 +146,7 @@ per-message флагом `reliable`.
 ```jsonc
 {
   "v": 1,                     // версия протокола
-  "op": "add|append|end|remove|clear|pointer|click|chat|sync-req|sync-state",
+  "op": "add|append|end|remove|clear|pointer|click|chat|typing|sync-req|sync-state",
   "author": "agent-ab12cd",   // = participant identity (дубль к LiveKit sender)
   "id": "agent-ab12cd:37",    // стабильный id аннотации (счётчик в рамках автора)
   "ts": 1720000000000
@@ -186,6 +186,14 @@ per-message флагом `reliable`.
 - UX на клиенте: во время сессии виден перетаскиваемый полупрозрачный FAB с
   бейджем непрочитанных → экран «Чат с поддержкой» (тот же экран доступен через
   Всякое → Настройки → Помощь и поддержка → Чат с поддержкой).
+- «Печатает» — `op: "typing"`, поле `typing: true|false`. Отправитель шлёт
+  heartbeat `true` при изменении непустого черновика не чаще раза в 2 с
+  (`TYPING_HEARTBEAT_MS`) и один `false`, когда черновик опустел; после отправки
+  сообщения отдельный `false` не нужен — получатель снимает индикатор по самому
+  `chat` (и по `participantDisconnected`). На приёме TTL 5 с (`TYPING_TTL_MS`) по
+  локальным часам получателя, чтобы рассинхрон часов не ломал гашение.
+  Reliable: сообщений мало, а порядок «true → false» важен. Показывается в
+  панели оператора, на экране чата клиента и капсулой с точками на FAB.
 
 **Надёжность:**
 

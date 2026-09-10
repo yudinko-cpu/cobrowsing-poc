@@ -53,6 +53,7 @@ import {
   type Point,
   type ContentRect,
 } from '../../../lib/anno';
+import { isChatOp } from '../../../lib/chat';
 
 type Tool = 'off' | 'pointer' | 'draw' | 'arrow' | 'rect' | 'ellipse';
 
@@ -173,10 +174,10 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       const msg = decode(payload);
       if (!msg) return;
 
-      // Чат поддержки — не аннотация и единственный op, который вправе слать
-      // клиент; живёт в ChatPanel (свой слушатель). Выходим ДО гейта прав,
-      // чтобы не считать его в dropped и не warn'ить.
-      if (msg.op === 'chat') return;
+      // Ops чата (chat, typing) — не аннотации и единственное, что вправе слать
+      // клиент; живут в ChatPanel (свой слушатель). Выходим ДО гейта прав,
+      // чтобы не считать их в dropped и не warn'ить.
+      if (isChatOp(msg.op)) return;
 
       // Гейт прав (§6.4). Клиент («Customer» в JWT-имени) не может быть автором
       // аннотаций; и наоборот — снапшот sync-state принимаем ТОЛЬКО от него,

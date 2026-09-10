@@ -78,6 +78,9 @@ public final class CobrowseClient: ObservableObject {
     /// аутентифицированную identity и дедупит по `identity|id`.
     private let chatIdGen = AnnoIdGen(author: "client")
 
+    /// Троттлинг «печатает» на отправителе (см. TypingTracker в ChatStore.swift).
+    private var typingTracker = TypingTracker()
+
     /// Код, который клиент показывает и диктует оператору.
     /// Доступен во время .streaming и .reconnecting (в реконнекте код тот же).
     public var sessionCode: String? {
@@ -166,6 +169,7 @@ public final class CobrowseClient: ObservableObject {
         await transport.unpublishAll()
         await transport.disconnect()
         currentRoomName = nil
+        typingTracker.reset()
 
         // 1. Явное согласие пользователя (см. ConsentPrompt.swift)
         state = .requestingConsent
@@ -300,6 +304,7 @@ public final class CobrowseClient: ObservableObject {
         guard let data = AnnoCodec.encode(msg) else { return }
 
         chat.appendLocal(text: text, id: id, ts: ts)
+        typingTracker.reset()   // получатели снимут «печатает» по самому сообщению
         Task {
             do {
                 // Broadcast-перегрузка CobrowseTransport (destinationIdentities: []).
@@ -309,6 +314,22 @@ public final class CobrowseClient: ObservableObject {
                 print("[CobrowseClient] chat send failed: \(error)")
                 #endif
             }
+        }
+    }
+
+    /// Сообщить операторам, печатает ли клиент. Дёргать при каждом изменении
+    /// черновика (`nonEmpty` — черновик непустой): троттлинг heartbeat'ов и
+    /// единственный «стоп» — внутри TypingTracker, по сети уходит только нужное.
+    /// Вне .streaming — тихий no-op. Reliable: порядок «true → false» важен.
+    public func setTyping(_ nonEmpty: Bool) {
+        guard case .streaming = state else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        guard let flag = typingTracker.onDraftChange(nonEmpty: nonEmpty, nowMs: now) else { return }
+        let msg = AnnoMsg(op: "typing", author: "client", ts: now, typing: flag)
+        guard let data = AnnoCodec.encode(msg) else { return }
+        Task {
+            // Best-effort: потерянный «стоп» подстрахует TTL на получателе.
+            try? await self.transport.sendData(data, topic: AnnoProtocol.topic, reliable: true)
         }
     }
 
@@ -443,6 +464,7 @@ extension CobrowseClient: CobrowseTransportDelegate {
         // Оператор ушёл — снимаем его аннотации у клиента (ANNO-5).
         Task { @MainActor in
             self.annotations.removeAuthor(identity)
+            self.chat.removeAuthor(identity)   // его «печатает» не должно висеть до TTL
         }
     }
 }

@@ -97,27 +97,6 @@ struct ContentView: View {
                 client.chat.reset()   // истории чата нет — живёт в рамках сессии
             }
         }
-        // DEBUG-жест: тап по невидимой зоне в левом-нижнем углу впрыскивает
-        // демо-аннотации — быстрая проверка координатного маппинга на устройстве
-        // (ANNO-1 AC3), пока входящий data-канал не подключён (ANNO-2).
-        #if DEBUG
-        .overlay(alignment: .bottomLeading) {
-            if overlayVisible {
-                Button {
-                    client.annotations.injectSampleAnnotations()
-                } label: {
-                    Image(systemName: "scribble")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(.black.opacity(0.5)))
-                }
-                .padding(.leading, 12)
-                .padding(.bottom, 80)
-                .accessibilityLabel("Демо-аннотации")
-            }
-        }
-        #endif
     }
 
     private var isStreaming: Bool {

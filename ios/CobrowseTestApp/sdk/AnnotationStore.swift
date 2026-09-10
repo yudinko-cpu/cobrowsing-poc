@@ -76,9 +76,10 @@ public final class AnnotationStore: ObservableObject {
             // Клиент — сам канонический источник и снапшоты извне не принимает:
             // иначе оператор мог бы подсунуть аннотации с чужим авторством.
             break
-        case "chat":
-            // Чат поддержки — не аннотация; его принимает ChatStore
-            // (CobrowseClient.didReceiveData маршрутизирует те же байты и туда).
+        case "chat", "typing":
+            // Ops чата поддержки (сообщение, «печатает») — не аннотации; их
+            // принимает ChatStore (CobrowseClient.didReceiveData маршрутизирует
+            // те же байты и туда).
             break
         default:
             apply(msg)
@@ -153,27 +154,4 @@ public final class AnnotationStore: ObservableObject {
         expiryTask?.cancel()
         expiryTask = nil
     }
-
-    #if DEBUG
-    /// Демо-аннотации для проверки координатного маппинга (ANNO-1 AC3).
-    /// Эллипс отцентрирован на (0.5, 0.5) — маркер обязан лечь ровно в центр
-    /// overlay-окна на любом устройстве. Триггерится DEBUG-жестом в ContentView.
-    public func injectSampleAnnotations() {
-        let now = Date().timeIntervalSince1970 * 1000
-        let a = "agent-demo"
-        apply(AnnoMsg(op: "add", author: a, ts: now, id: "\(a):center",
-                      kind: "shape", color: "#0a84ff", w: 0.006,
-                      from: [0.47, 0.47], to: [0.53, 0.53], shape: "ellipse", fill: true))
-        apply(AnnoMsg(op: "add", author: a, ts: now, id: "\(a):arrow",
-                      kind: "arrow", color: "#ff375f", w: 0.006,
-                      from: [0.2, 0.2], to: [0.5, 0.5]))
-        apply(AnnoMsg(op: "add", author: a, ts: now, id: "\(a):path",
-                      kind: "path", color: "#30d158", w: 0.008,
-                      pts: [[0.15, 0.8], [0.3, 0.72], [0.45, 0.82], [0.6, 0.72]]))
-        apply(AnnoMsg(op: "add", author: a, ts: now, id: "\(a):text",
-                      kind: "text", color: "#bf5af2", at: [0.1, 0.6], text: "Нажмите здесь", size: 0.035))
-        apply(AnnoMsg(op: "pointer", author: "agent-demo2", ts: now,
-                      color: "#ffd60a", at: [0.78, 0.35]))
-    }
-    #endif
 }

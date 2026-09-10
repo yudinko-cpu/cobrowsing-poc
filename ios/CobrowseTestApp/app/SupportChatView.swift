@@ -10,7 +10,8 @@
 //  В обоих случаях «Назад» — это @Environment(\.dismiss): pop при пуше и закрытие
 //  презентации, когда view — корень NavigationStack в cover.
 //
-//  Данные — ChatStore из SDK (client.chat), отправка — client.sendChatMessage.
+//  Данные — ChatStore из SDK (client.chat), отправка — client.sendChatMessage,
+//  «печатает» — client.setTyping при каждом изменении черновика.
 //
 
 import SwiftUI
@@ -19,9 +20,12 @@ struct SupportChatView: View {
     @EnvironmentObject private var client: CobrowseClient
 
     var body: some View {
-        SupportChatContent(chat: client.chat, canSend: canSend) { text in
-            try client.sendChatMessage(text)
-        }
+        SupportChatContent(
+            chat: client.chat,
+            canSend: canSend,
+            onSend: { text in try client.sendChatMessage(text) },
+            onTyping: { nonEmpty in client.setTyping(nonEmpty) }
+        )
     }
 
     /// Только .streaming: в .reconnecting транспорт не отправит (notConnected),
@@ -40,6 +44,7 @@ private struct SupportChatContent: View {
     @ObservedObject var chat: ChatStore
     let canSend: Bool
     let onSend: (String) throws -> Void
+    let onTyping: (Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var draft = ""
@@ -50,7 +55,7 @@ private struct SupportChatContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if chat.messages.isEmpty {
+            if chat.messages.isEmpty && chat.typing.isEmpty {
                 ContentUnavailableView(
                     "Пока нет сообщений",
                     systemImage: "bubble.left.and.bubble.right",
@@ -64,18 +69,24 @@ private struct SupportChatContent: View {
                             ForEach(chat.messages) { message in
                                 MessageBubble(message: message)
                             }
+                            // «Оператор печатает» — как в мессенджерах: серый
+                            // пузырь с бегущими точками в конце ленты.
+                            if !chat.typing.isEmpty {
+                                TypingBubble(label: typingLabel)
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
                             Color.clear.frame(height: 1).id(bottomAnchor)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
+                        .animation(.easeInOut(duration: 0.2), value: chat.typing.isEmpty)
                     }
                     // Стартуем снизу; при появлении клавиатуры контент остаётся
                     // прижат к последнему сообщению без ручных хаков.
                     .defaultScrollAnchor(.bottom)
                     .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: chat.messages.count) { _, _ in
-                        withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
-                    }
+                    .onChange(of: chat.messages.count) { _, _ in scrollToBottom(proxy) }
+                    .onChange(of: chat.typing.isEmpty) { _, _ in scrollToBottom(proxy) }
                 }
             }
 
@@ -102,11 +113,27 @@ private struct SupportChatContent: View {
                 .accessibilityLabel("Назад")
             }
         }
+        // «Печатает»: троттлинг и «стоп» — внутри client.setTyping, здесь
+        // только факт «черновик непустой».
+        .onChange(of: draft) { _, new in
+            onTyping(!new.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
         // isOpen: входящие не копят unread, FAB прячется. onAppear/onDisappear
         // срабатывают и при переключении табов с запушенным экраном — это
         // корректно: на другом табе FAB снова виден.
         .onAppear { chat.isOpen = true }
-        .onDisappear { chat.isOpen = false }
+        .onDisappear {
+            chat.isOpen = false
+            onTyping(false)   // ушли с экрана — «печатает» снимаем, черновик всё равно теряется
+        }
+    }
+
+    private var typingLabel: String {
+        chat.typing.count > 1 ? "Операторы печатают" : "Оператор печатает"
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
     }
 
     private var inputBar: some View {
@@ -184,6 +211,30 @@ private struct MessageBubble: View {
             }
             if !message.isMine { Spacer(minLength: 48) }
         }
+    }
+}
+
+// MARK: - Пузырь «печатает»
+
+/// Серый пузырь входящего с бегущими точками и подписью под ним.
+private struct TypingBubble: View {
+    let label: String
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                TypingDots(color: .secondary, dotSize: 7, spacing: 4)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 48)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
     }
 }
 

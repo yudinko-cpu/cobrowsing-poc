@@ -43,7 +43,7 @@ public typealias AnnoPoint = [Double] // [nx, ny], каждая в [0..1]
 /// nil-поля опускаются (как undefined в JSON.stringify).
 public struct AnnoMsg: Codable, Equatable {
     public var v: Int
-    public var op: String          // add|append|end|remove|clear|pointer|click|chat|sync-req|sync-state
+    public var op: String          // add|append|end|remove|clear|pointer|click|chat|typing|sync-req|sync-state
     public var author: String      // participant identity
     public var ts: Double
     public var id: String?         // "author:counter"
@@ -60,6 +60,7 @@ public struct AnnoMsg: Codable, Equatable {
     public var fill: Bool?         // shape
     public var scope: String?      // clear: own|all
     public var items: [Annotation]? // sync-state
+    public var typing: Bool?       // typing: true — печатает (heartbeat), false — перестал
 
     public init(v: Int = AnnoProtocol.version,
                 op: String,
@@ -78,12 +79,13 @@ public struct AnnoMsg: Codable, Equatable {
                 shape: String? = nil,
                 fill: Bool? = nil,
                 scope: String? = nil,
-                items: [Annotation]? = nil) {
+                items: [Annotation]? = nil,
+                typing: Bool? = nil) {
         self.v = v; self.op = op; self.author = author; self.ts = ts
         self.id = id; self.kind = kind; self.color = color; self.w = w
         self.pts = pts; self.from = from; self.to = to; self.at = at
         self.text = text; self.size = size; self.shape = shape; self.fill = fill
-        self.scope = scope; self.items = items
+        self.scope = scope; self.items = items; self.typing = typing
     }
 }
 
@@ -342,9 +344,9 @@ public final class AnnoState {
             // адресно запросившему). Здесь состояние не меняется.
             break
 
-        case "chat":
-            // Чат — не состояние аннотаций: живёт в ChatStore и в sync-state
-            // не входит (истории нет). Здесь — осознанный no-op.
+        case "chat", "typing":
+            // Чат и «печатает» — не состояние аннотаций: живут в ChatStore и в
+            // sync-state не входят (истории нет). Здесь — осознанный no-op.
             break
 
         default:
@@ -401,7 +403,7 @@ public extension AnnoProtocol {
     static func isReliable(op: String) -> Bool {
         switch op {
         case "pointer", "append": return false // высокочастотные, потеря незаметна
-        default: return true                    // add/end/remove/clear/click/chat/sync-* критичны
+        default: return true                    // add/end/remove/clear/click/chat/typing/sync-* критичны
         }
     }
 }
