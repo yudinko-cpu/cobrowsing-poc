@@ -2,7 +2,7 @@
 
 /**
  * Viewer-страница: подключается к LiveKit Room по коду,
- * отображает screen-share видео клиента + voice chat.
+ * отображает screen-share видео клиента + voice chat + текстовый чат с клиентом.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -20,6 +20,7 @@ import type { DisconnectReason, RemoteTrack, RemoteTrackPublication, TrackPublic
 import '@livekit/components-styles';
 import { apiFetch } from '../../../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
+import { ChatPanel } from './ChatPanel';
 import { colorForIdentity } from '../../../lib/anno';
 
 /**
@@ -259,50 +260,56 @@ function SessionView({
         </div>
       </header>
 
-      <div style={styles.videoContainer} ref={videoBoxRef}>
-        {/* Локальный override поверх @livekit/components-styles.
-            Default .lk-participant-media-video ставит object-fit:cover
-            (обрезает по контейнеру). Overrid'ы для source=screen_share есть,
-            но срабатывают, только если у track'а именно этот source; мы же
-            принимаем любой video, поэтому подстраховываемся !important'ом.
-            width/height 100% (а не auto) — важно: с auto video берёт
-            intrinsic-размеры (portrait iPhone screen = высокий), из-за чего
-            родительский flex-контейнер тянется по content'у и вываливается
-            за viewport. С 100% + object-fit:contain video сжимается внутри
-            бокса и правильно letterbox'ится. */}
-        <style>{`
-          .cobrowse-video {
-            width: 100% !important;
-            height: 100% !important;
-            object-fit: contain !important;
-            background: transparent !important;
-          }
-        `}</style>
+      {/* Ряд под шапкой: видео (flex:1) + чат с клиентом (фиксированные 320px справа). */}
+      <div style={styles.main}>
+        <div style={styles.videoContainer} ref={videoBoxRef}>
+          {/* Локальный override поверх @livekit/components-styles.
+              Default .lk-participant-media-video ставит object-fit:cover
+              (обрезает по контейнеру). Overrid'ы для source=screen_share есть,
+              но срабатывают, только если у track'а именно этот source; мы же
+              принимаем любой video, поэтому подстраховываемся !important'ом.
+              width/height 100% (а не auto) — важно: с auto video берёт
+              intrinsic-размеры (portrait iPhone screen = высокий), из-за чего
+              родительский flex-контейнер тянется по content'у и вываливается
+              за viewport. С 100% + object-fit:contain video сжимается внутри
+              бокса и правильно letterbox'ится. */}
+          <style>{`
+            .cobrowse-video {
+              width: 100% !important;
+              height: 100% !important;
+              object-fit: contain !important;
+              background: transparent !important;
+            }
+          `}</style>
 
-        {trackRef ? (
-          <VideoTrack trackRef={trackRef} className="cobrowse-video" />
-        ) : (
-          <WaitingPlaceholder
-            customerPresent={customerPresent}
+          {trackRef ? (
+            <VideoTrack trackRef={trackRef} className="cobrowse-video" />
+          ) : (
+            <WaitingPlaceholder
+              customerPresent={customerPresent}
+              videoPublications={videoPublications}
+            />
+          )}
+
+          {/* Debug HUD — виден всегда, потому что POC. */}
+          <DebugHUD
+            connectionState={connectionState}
+            roomName={roomName}
+            serverUrl={serverUrl}
+            participantCount={remoteParticipants.length}
             videoPublications={videoPublications}
+            showingTrack={trackRef !== null}
+            videoStats={videoStats}
+            iceState={iceState}
           />
-        )}
 
-        {/* Debug HUD — виден всегда, потому что POC. */}
-        <DebugHUD
-          connectionState={connectionState}
-          roomName={roomName}
-          serverUrl={serverUrl}
-          participantCount={remoteParticipants.length}
-          videoPublications={videoPublications}
-          showingTrack={trackRef !== null}
-          videoStats={videoStats}
-          iceState={iceState}
-        />
+          {/* Операторские аннотации: SVG-слой поверх контент-бокса видео (ANNO-3).
+              Ввод/тулбар — ANNO-4. */}
+          <AnnotationOverlay containerRef={videoBoxRef} />
+        </div>
 
-        {/* Операторские аннотации: SVG-слой поверх контент-бокса видео (ANNO-3).
-            Ввод/тулбар — ANNO-4. */}
-        <AnnotationOverlay containerRef={videoBoxRef} />
+        {/* Мессенджер с клиентом — тот же data-канал, что аннотации (op chat). */}
+        <ChatPanel />
       </div>
     </div>
   );
@@ -795,12 +802,18 @@ const styles: Record<string, React.CSSProperties> = {
   rosterItem: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', fontSize: 13 },
   rosterDot: { width: 8, height: 8, borderRadius: '50%', background: '#22c55e', flex: '0 0 auto' },
   rosterYou: { marginLeft: 'auto', fontSize: 11, color: '#93c5fd', fontWeight: 600 },
+  // Ряд под шапкой: видео + панель чата. flex:1 + minHeight:0 — те же инварианты,
+  // что у videoContainer ниже, иначе ряд растёт по контенту и вываливается за viewport.
+  main: { display: 'flex', flex: 1, minHeight: 0 },
   // minHeight: 0 — обязательно для flex-item в column-родителе. Без него
   // default min-height: auto = intrinsic content size, и если video внутри
   // хочет быть высоким (portrait iPhone), контейнер разрастается за пределы
   // flex-share, выталкивая всё за viewport → появляется скролл. С min-height:0
   // flex-share (calculated from parent height − siblings) корректно ограничивает.
-  videoContainer: { flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  // minWidth: 0 — горизонтальный близнец того же правила: у бокса появился сосед
+  // справа (панель чата), и без него intrinsic-ширина video вытолкнула бы её
+  // за viewport.
+  videoContainer: { flex: 1, minWidth: 0, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' },
   waiting: { color: '#9ca3af', fontSize: 18, textAlign: 'center', lineHeight: 1.5 },
   debugHud: {
     position: 'absolute',

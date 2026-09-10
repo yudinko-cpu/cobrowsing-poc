@@ -4,8 +4,9 @@
 //
 //  TabView с 5 экранами для тестирования screen share + REC-индикатор в верхнем
 //  safe-area (виден на любом табе) + floating шестерёнка настроек видео
-//  (в верхнем-правом углу, тоже поверх всех табов). Обе кнопки-оверлея живут
-//  здесь, а не в отдельных табах, чтобы поведение было консистентным везде.
+//  (в верхнем-правом углу, тоже поверх всех табов) + перетаскиваемая плавающая
+//  кнопка чата поддержки (SupportFAB). Все кнопки-оверлеи живут здесь, а не в
+//  отдельных табах, чтобы поведение было консистентным везде.
 //
 
 import SwiftUI
@@ -13,6 +14,10 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var client: CobrowseClient
     @State private var showVideoSettings = false
+    @State private var showSupportChat = false
+    /// Позиция FAB чата. Живёт здесь, а не в SupportFAB: кнопка монтируется
+    /// условно и прячется при открытом чате — локальный @State сбрасывался бы.
+    @State private var fabPosition: CGPoint?
 
     // Менеджер overlay-окна аннотаций. @State держит инстанс между перерисовками.
     @State private var overlayHost = AnnotationOverlayHost()
@@ -56,19 +61,40 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: isStreaming)
+        // Плавающая кнопка чата поддержки — только при активной сессии
+        // (streaming/reconnecting, как overlay аннотаций). Пока открыт экран
+        // чата (cover или push из Настроек), кнопка прячется сама по chat.isOpen.
+        .overlay {
+            if overlayVisible {
+                SupportFAB(chat: client.chat, position: $fabPosition) {
+                    showSupportChat = true
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: overlayVisible)
+        // Cover, а не sheet: «Назад» возвращает ровно туда, где был пользователь,
+        // на любом табе и на любой глубине навигации.
+        .fullScreenCover(isPresented: $showSupportChat) {
+            NavigationStack {
+                SupportChatView()
+            }
+            .environmentObject(client)
+        }
         .sheet(isPresented: $showVideoSettings) {
             VideoSettingsSheet(current: client.screenShareOptions)
                 .environmentObject(client)
         }
         // Монтаж/демонтаж overlay-окна аннотаций по состоянию сессии.
         // Видим при активной сессии (.streaming/.reconnecting), снимаем и чистим
-        // стор в терминальных состояниях (.ended/.error/.idle).
+        // сторы аннотаций и чата в терминальных состояниях (.ended/.error/.idle).
         .onChange(of: overlayVisible, initial: true) { _, visible in
             if visible {
                 overlayHost.show(store: client.annotations)
             } else {
                 overlayHost.hide()
                 client.annotations.reset()
+                client.chat.reset()   // истории чата нет — живёт в рамках сессии
             }
         }
         // DEBUG-жест: тап по невидимой зоне в левом-нижнем углу впрыскивает

@@ -6,7 +6,8 @@
  * поймут друг друга. Любая правка схемы здесь → синхронная правка в Swift.
  *
  * Слои:
- *   • AnnoMsg   — сообщение на data-канале (topic = ANNO_TOPIC).
+ *   • AnnoMsg   — сообщение на data-канале (topic = ANNO_TOPIC). Тем же конвертом
+ *                 едет и чат поддержки (op 'chat', см. lib/chat.ts).
  *   • Annotation — сохранённая аннотация в сторе (мёрж входящих ops).
  *   • координаты — нормализованные [0..1] по контент-боксу видео (object-fit:contain).
  *   • цвета     — детерминированы по identity (FNV-1a), палитра идентична Swift.
@@ -25,6 +26,12 @@ export const ANNO_VERSION = 1;
 /** Максимальная длина текстовой аннотации (символов). Санитизация на приёме. */
 export const MAX_TEXT_LEN = 200;
 
+/**
+ * Максимальная длина сообщения чата поддержки (op 'chat'). Отдельно от
+ * MAX_TEXT_LEN: подпись на экране и реплика в чате — разные вещи.
+ */
+export const MAX_CHAT_LEN = 1000;
+
 // ── Типы ─────────────────────────────────────────────────────────────────────
 
 export type Op =
@@ -35,6 +42,7 @@ export type Op =
   | 'clear' // снять все (scope: own | all)
   | 'pointer' // эфемерная лазерная указка
   | 'click' // клик указкой — эфемерная расходящаяся «волна»
+  | 'chat' // сообщение чата поддержки — не аннотация (см. lib/chat.ts)
   | 'sync-req' // запрос полного состояния (позднее подключение / реконнект)
   | 'sync-state'; // ответ с полным снапшотом
 
@@ -62,7 +70,7 @@ export interface AnnoMsg {
   from?: Point; // arrow/shape: первый угол
   to?: Point; // arrow/shape: второй угол
   at?: Point; // text/pointer: точка
-  text?: string; // text
+  text?: string; // text-аннотация | chat
   size?: number; // text: нормализованный кегль
   shape?: ShapeKind; // shape: rect | ellipse
   fill?: boolean; // shape: полупрозрачная заливка
@@ -355,6 +363,10 @@ export function apply(
     case 'sync-req':
       // Обрабатывается на транспортном слое (клиент отвечает sync-state).
       return;
+    case 'chat':
+      // Чат — не состояние аннотаций: живёт в своём сторе (ChatPanel / ChatStore)
+      // и в sync-state не входит (истории нет). Здесь — осознанный no-op.
+      return;
   }
 }
 
@@ -407,6 +419,15 @@ export function snapshot(state: AnnoState): Annotation[] {
 
 function clampText(t: string): string {
   return t.length > MAX_TEXT_LEN ? t.slice(0, MAX_TEXT_LEN) : t;
+}
+
+/**
+ * Санитизация текста чата: trim, затем срез до MAX_CHAT_LEN. Одна точка для
+ * отправителя и получателя; зеркалит `ChatStore.sanitize` на iOS.
+ */
+export function clampChatText(t: string): string {
+  const s = t.trim();
+  return s.length > MAX_CHAT_LEN ? s.slice(0, MAX_CHAT_LEN) : s;
 }
 
 // ── Хелперы отправителя ──────────────────────────────────────────────────────
@@ -522,6 +543,6 @@ export function isReliable(op: Op): boolean {
     case 'append':
       return false; // высокочастотные; потеря отдельного апдейта незаметна
     default:
-      return true; // add/end/remove/clear/sync-* — критично не потерять
+      return true; // add/end/remove/clear/click/chat/sync-* — критично не потерять
   }
 }

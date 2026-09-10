@@ -59,8 +59,10 @@ public final class AnnotationStore: ObservableObject {
     /// совпадают; при подмене — сообщение атрибутируется реальному отправителю,
     /// поэтому один оператор не может выдать себя за другого, стереть или
     /// дополнить чужие аннотации (append/remove гейтятся по author в AnnoState).
-    /// Как следствие, «Customer» не может быть автором: клиент сам не публикует,
-    /// а LiveKit не возвращает локальные data-сообщения отправителю.
+    /// Как следствие, «Customer» не может быть автором аннотаций: клиент публикует
+    /// только `chat` (единственный op, который ему разрешён; здесь он пропускается,
+    /// а обрабатывается в ChatStore), а LiveKit не возвращает локальные
+    /// data-сообщения отправителю.
     public func handle(data: Data, topic: String, from identity: String?) {
         guard topic == AnnoProtocol.topic, var msg = AnnoCodec.decode(data) else { return }
         if let identity, !identity.isEmpty { msg.author = identity }
@@ -73,6 +75,10 @@ public final class AnnotationStore: ObservableObject {
         case "sync-state":
             // Клиент — сам канонический источник и снапшоты извне не принимает:
             // иначе оператор мог бы подсунуть аннотации с чужим авторством.
+            break
+        case "chat":
+            // Чат поддержки — не аннотация; его принимает ChatStore
+            // (CobrowseClient.didReceiveData маршрутизирует те же байты и туда).
             break
         default:
             apply(msg)

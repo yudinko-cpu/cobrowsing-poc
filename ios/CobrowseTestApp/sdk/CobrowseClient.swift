@@ -68,6 +68,16 @@ public final class CobrowseClient: ObservableObject {
     /// именно сюда транспорт доставляет байты аннотаций.
     public let annotations = AnnotationStore()
 
+    /// Стор чата поддержки. Сообщения едут тем же data-топиком, что аннотации
+    /// (`op: "chat"`), и маршрутизируются в `didReceiveData` параллельно с
+    /// `annotations`. Истории нет — хост сбрасывает его вместе с overlay.
+    public let chat = ChatStore()
+
+    /// Счётчик id своих сообщений чата: "client:1", "client:2", … Псевдо-автор
+    /// "client" — как в sendSyncState: получатель перезапишет author на
+    /// аутентифицированную identity и дедупит по `identity|id`.
+    private let chatIdGen = AnnoIdGen(author: "client")
+
     /// Код, который клиент показывает и диктует оператору.
     /// Доступен во время .streaming и .reconnecting (в реконнекте код тот же).
     public var sessionCode: String? {
@@ -273,6 +283,35 @@ public final class CobrowseClient: ObservableObject {
         state = .ended
     }
 
+    /// Отправить сообщение в чат поддержки.
+    ///
+    /// Broadcast всем операторам в комнате (co-viewing: коллеги видят переписку),
+    /// reliable. Своё сообщение применяем локально сразу — LiveKit не возвращает
+    /// data отправителю. Разрешено только в .streaming: в .reconnecting транспорт
+    /// кинет notConnected, а в терминальных состояниях некому доставлять.
+    /// Пустой (после trim) текст — тихий no-op.
+    public func sendChatMessage(_ raw: String) throws {
+        guard case .streaming = state else { throw CobrowseError.chatUnavailable }
+        guard let text = ChatStore.sanitize(raw) else { return }
+
+        let id = chatIdGen.next()
+        let ts = Date().timeIntervalSince1970 * 1000
+        let msg = AnnoMsg(op: "chat", author: "client", ts: ts, id: id, text: text)
+        guard let data = AnnoCodec.encode(msg) else { return }
+
+        chat.appendLocal(text: text, id: id, ts: ts)
+        Task {
+            do {
+                // Broadcast-перегрузка CobrowseTransport (destinationIdentities: []).
+                try await self.transport.sendData(data, topic: AnnoProtocol.topic, reliable: true)
+            } catch {
+                #if DEBUG
+                print("[CobrowseClient] chat send failed: \(error)")
+                #endif
+            }
+        }
+    }
+
     // MARK: - Backend
 
     private func createSessionOnBackend(customerId: String?) async throws -> SessionCreateResponse {
@@ -381,12 +420,15 @@ extension CobrowseClient: CobrowseTransportDelegate {
                                       didReceiveData data: Data,
                                       topic: String,
                                       fromParticipantIdentity identity: String?) {
-        // Доставляем байты в стор аннотаций. Фильтр по topic и декод — внутри
-        // AnnotationStore.handle; чужие топики (будущие control-каналы) он молча
-        // игнорирует. Транспорт остаётся нейтральным — SDK лишь маршрутизирует
-        // на MainActor, где живёт @Published-стор для overlay-рендера.
+        // Доставляем байты в оба стора — аннотаций и чата. Фильтр по topic/op и
+        // декод — внутри каждого handle; чужие топики (будущие control-каналы)
+        // и чужие ops они молча игнорируют. Двойной декод крошечных JSON-пакетов
+        // дешевле общего диспетчера, который знал бы обо всех сторах. Транспорт
+        // остаётся нейтральным — SDK лишь маршрутизирует на MainActor, где живут
+        // @Published-сторы для UI.
         Task { @MainActor in
             self.annotations.handle(data: data, topic: topic, from: identity)
+            self.chat.handle(data: data, topic: topic, from: identity)
         }
     }
 
@@ -411,6 +453,7 @@ public enum CobrowseError: LocalizedError {
     case consentDenied
     case alreadyActive
     case notStreaming
+    case chatUnavailable
     case backendError(statusCode: Int)
 
     public var errorDescription: String? {
@@ -418,6 +461,7 @@ public enum CobrowseError: LocalizedError {
         case .consentDenied:          return "Пользователь не дал согласие на запись экрана"
         case .alreadyActive:          return "Сессия уже активна"
         case .notStreaming:           return "Сессия не в состоянии streaming — параметры сохранены, применятся при следующем старте"
+        case .chatUnavailable:        return "Чат доступен только во время активной сессии с оператором"
         case .backendError(let code): return "Сервер вернул ошибку \(code)"
         }
     }

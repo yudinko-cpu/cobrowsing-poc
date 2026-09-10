@@ -4,6 +4,8 @@
  * AnnotationOverlay — слой операторских аннотаций поверх видео клиента.
  *
  * ANNO-3: приём и рендер входящих. ANNO-4: тулбар, ввод и отправка.
+ * Текстовый инструмент убран — его заменил чат поддержки (ChatPanel, op 'chat');
+ * kind 'text' в рендере оставлен для совместимости (sync-state, старые вкладки).
  *
  * Единый AnnoState держит и СВОИ (оптимистично), и чужие аннотации: LiveKit не
  * возвращает отправителю его же data-сообщения, поэтому свои штрихи применяем
@@ -27,7 +29,6 @@ import { useRoomContext } from '@livekit/components-react';
 import {
   ANNO_TOPIC,
   ANNO_VERSION,
-  MAX_TEXT_LEN,
   decode,
   encode,
   isReliable,
@@ -53,10 +54,9 @@ import {
   type ContentRect,
 } from '../../../lib/anno';
 
-type Tool = 'off' | 'pointer' | 'draw' | 'arrow' | 'rect' | 'ellipse' | 'text';
+type Tool = 'off' | 'pointer' | 'draw' | 'arrow' | 'rect' | 'ellipse';
 
 const STROKE_W = 0.006; // нормализованная толщина линии
-const TEXT_SIZE = 0.035; // нормализованный кегль
 
 const TOOLS: { tool: Tool; icon: string; title: string }[] = [
   { tool: 'off', icon: '🖱', title: 'Курсор (не рисовать)' },
@@ -65,7 +65,6 @@ const TOOLS: { tool: Tool; icon: string; title: string }[] = [
   { tool: 'arrow', icon: '↗', title: 'Стрелка' },
   { tool: 'rect', icon: '▭', title: 'Прямоугольник' },
   { tool: 'ellipse', icon: '◯', title: 'Овал' },
-  { tool: 'text', icon: 'T', title: 'Текст' },
 ];
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -106,10 +105,6 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
 
   // Метрики data-канала — для приёмки ANNO-7 (размеры пакетов, объём трафика).
   const statsRef = useRef({ sent: 0, recv: 0, bytesSent: 0, bytesRecv: 0, maxMsg: 0, failed: 0, dropped: 0 });
-
-  // Инлайн-редактор текста.
-  const [textDraft, setTextDraft] = useState<{ at: Point; x: number; y: number } | null>(null);
-  const textValueRef = useRef('');
 
   const nextId = () => `${myId}:${(counterRef.current += 1)}`;
 
@@ -177,6 +172,11 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
       statsRef.current.bytesRecv += payload.length;
       const msg = decode(payload);
       if (!msg) return;
+
+      // Чат поддержки — не аннотация и единственный op, который вправе слать
+      // клиент; живёт в ChatPanel (свой слушатель). Выходим ДО гейта прав,
+      // чтобы не считать его в dropped и не warn'ить.
+      if (msg.op === 'chat') return;
 
       // Гейт прав (§6.4). Клиент («Customer» в JWT-имени) не может быть автором
       // аннотаций; и наоборот — снапшот sync-state принимаем ТОЛЬКО от него,
@@ -341,15 +341,6 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
 
     const p = pointFromEvent(e);
 
-    if (tool === 'text') {
-      // Клик в новое место при открытом поле — сначала фиксируем предыдущий ввод,
-      // иначе набранный текст потерялся бы.
-      if (textDraft) confirmText();
-      setTextDraft({ at: p, x: rect.x + p[0] * rect.w, y: rect.y + p[1] * rect.h });
-      textValueRef.current = '';
-      return;
-    }
-
     (e.target as Element).setPointerCapture?.(e.pointerId);
     const id = nextId();
     ownIdsRef.current.push(id);
@@ -418,22 +409,6 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
     drawingRef.current = null;
   };
 
-  // ── Текст ────────────────────────────────────────────────────────────────────
-  const confirmText = () => {
-    const t = textValueRef.current.trim();
-    if (textDraft && t) {
-      const id = nextId();
-      ownIdsRef.current.push(id);
-      emit(makeMsg({ op: 'add', id, kind: 'text', color: myColor, at: textDraft.at, text: t, size: TEXT_SIZE }));
-    }
-    setTextDraft(null);
-    textValueRef.current = '';
-  };
-  const cancelText = () => {
-    setTextDraft(null);
-    textValueRef.current = '';
-  };
-
   // ── Undo / Clear ──────────────────────────────────────────────────────────────
   const undo = () => {
     const id = ownIdsRef.current.pop();
@@ -479,8 +454,9 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           // Гасим дефолт mousedown: иначе браузер уводит фокус на <body>
-          // (этот div не фокусируемый), инлайн-поле текста мгновенно получает
-          // blur и закрывается — поле просто не успевало показаться.
+          // (этот div не фокусируемый) — оператор теряет фокус в поле чата,
+          // кликнув по видео во время набора, — и начинает выделять текст /
+          // тянуть картинку во время рисования.
           onMouseDown={(e) => e.preventDefault()}
           style={{
             position: 'absolute',
@@ -489,44 +465,8 @@ export function AnnotationOverlay({ containerRef }: { containerRef: RefObject<HT
             width: rect.w,
             height: rect.h,
             zIndex: 6,
-            cursor: tool === 'text' ? 'text' : 'crosshair',
+            cursor: 'crosshair',
             touchAction: 'none',
-            pointerEvents: 'auto',
-          }}
-        />
-      )}
-
-      {/* Инлайн-редактор текста. */}
-      {textDraft && (
-        <input
-          autoFocus
-          defaultValue=""
-          maxLength={MAX_TEXT_LEN}
-          placeholder="Текст…"
-          onChange={(e) => {
-            textValueRef.current = e.target.value;
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              confirmText();
-            } else if (e.key === 'Escape') {
-              cancelText();
-            }
-          }}
-          onBlur={confirmText}
-          style={{
-            position: 'absolute',
-            left: textDraft.x,
-            top: textDraft.y,
-            zIndex: 25,
-            font: '600 14px system-ui, sans-serif',
-            color: myColor,
-            background: 'rgba(0,0,0,0.6)',
-            border: `1px solid ${myColor}`,
-            borderRadius: 4,
-            padding: '2px 6px',
-            outline: 'none',
             pointerEvents: 'auto',
           }}
         />

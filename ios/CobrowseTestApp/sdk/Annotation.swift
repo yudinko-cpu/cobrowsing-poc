@@ -29,6 +29,9 @@ public enum AnnoProtocol {
     public static let version = 1
     /// Максимальная длина текстовой аннотации (символов).
     public static let maxTextLen = 200
+    /// Максимальная длина сообщения чата поддержки (op "chat"). Отдельно от
+    /// maxTextLen: подпись на экране и реплика в чате — разные вещи.
+    public static let maxChatLen = 1000
 }
 
 // MARK: - Wire-типы (значения строковые для forward-compat — как в TS union'ах)
@@ -40,7 +43,7 @@ public typealias AnnoPoint = [Double] // [nx, ny], каждая в [0..1]
 /// nil-поля опускаются (как undefined в JSON.stringify).
 public struct AnnoMsg: Codable, Equatable {
     public var v: Int
-    public var op: String          // add|append|end|remove|clear|pointer|sync-req|sync-state
+    public var op: String          // add|append|end|remove|clear|pointer|click|chat|sync-req|sync-state
     public var author: String      // participant identity
     public var ts: Double
     public var id: String?         // "author:counter"
@@ -51,7 +54,7 @@ public struct AnnoMsg: Codable, Equatable {
     public var from: AnnoPoint?    // arrow/shape
     public var to: AnnoPoint?      // arrow/shape
     public var at: AnnoPoint?      // text/pointer
-    public var text: String?       // text
+    public var text: String?       // text-аннотация | chat
     public var size: Double?       // нормализованный кегль
     public var shape: String?      // rect|ellipse
     public var fill: Bool?         // shape
@@ -339,6 +342,11 @@ public final class AnnoState {
             // адресно запросившему). Здесь состояние не меняется.
             break
 
+        case "chat":
+            // Чат — не состояние аннотаций: живёт в ChatStore и в sync-state
+            // не входит (истории нет). Здесь — осознанный no-op.
+            break
+
         default:
             break // неизвестный op — forward-compat, игнорируем
         }
@@ -393,7 +401,7 @@ public extension AnnoProtocol {
     static func isReliable(op: String) -> Bool {
         switch op {
         case "pointer", "append": return false // высокочастотные, потеря незаметна
-        default: return true                    // add/end/remove/clear/sync-* критичны
+        default: return true                    // add/end/remove/clear/click/chat/sync-* критичны
         }
     }
 }

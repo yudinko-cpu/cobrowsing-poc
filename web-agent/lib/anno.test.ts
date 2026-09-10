@@ -37,7 +37,10 @@ import {
   expireClicks,
   clickProgress,
   CLICK_TTL_MS,
+  MAX_CHAT_LEN,
+  clampChatText,
 } from './anno.ts';
+import { chatFromMsg, makeChatMsg } from './chat.ts';
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -389,6 +392,56 @@ test('clickProgress идёт 0→1 и зажимается', () => {
 
 test('click — reliable (разовое событие-акцент)', () => {
   assert.equal(isReliable('click'), true);
+});
+
+// ── Чат поддержки (op chat) ───────────────────────────────────────────────────
+
+test('chat: round-trip кодека и reliable', () => {
+  const msg = mk('chat', 'agent-a', { id: 'agent-a:1', text: 'привет' });
+  assert.deepEqual(decode(encode(msg)), msg);
+  assert.equal(isReliable('chat'), true);
+});
+
+test('chat не трогает состояние аннотаций', () => {
+  const s = newState();
+  apply(s, mk('add', 'a', { id: 'a:1', kind: 'path', pts: [[0.1, 0.1]] }));
+  apply(s, mk('chat', 'a', { id: 'a:2', text: 'не аннотация' }));
+  assert.equal(s.items.size, 1);
+  assert.equal(s.items.has('a:2'), false);
+  assert.equal(s.pointers.size, 0);
+  assert.equal(s.clicks.size, 0);
+});
+
+test('clampChatText: trim + лимит', () => {
+  assert.equal(clampChatText('  hi \n'), 'hi');
+  assert.equal(clampChatText('   '), '');
+  assert.equal(clampChatText('a'.repeat(MAX_CHAT_LEN + 5)).length, MAX_CHAT_LEN);
+});
+
+test('chatFromMsg отвергает пустой/пробельный/отсутствующий text и чужой op', () => {
+  assert.equal(chatFromMsg(mk('chat', 'a', { id: 'a:1', text: '' }), 'a'), null);
+  assert.equal(chatFromMsg(mk('chat', 'a', { id: 'a:1', text: '  \n ' }), 'a'), null);
+  assert.equal(chatFromMsg(mk('chat', 'a', { id: 'a:1' }), 'a'), null);
+  assert.equal(chatFromMsg(mk('add', 'a', { id: 'a:1', kind: 'text', text: 'x' }), 'a'), null);
+});
+
+test('chatFromMsg: автор из identity отправителя, ключ дедупа author|id', () => {
+  const msg = mk('chat', 'spoofed', { id: 'client:7', text: '  ок  ' });
+  const cm = chatFromMsg(msg, 'customer-real')!;
+  assert.equal(cm.author, 'customer-real');
+  assert.equal(cm.key, 'customer-real|client:7');
+  assert.equal(cm.text, 'ок');
+  assert.equal(cm.ts, msg.ts);
+  // Без identity от транспорта — fallback на payload.author; без id — на ts.
+  const fb = chatFromMsg(mk('chat', 'agent-b', { text: 'x' }))!;
+  assert.equal(fb.author, 'agent-b');
+  assert.equal(fb.key, `agent-b|${fb.ts}`);
+});
+
+test('makeChatMsg: null на пустом, иначе конверт v/op/id/text', () => {
+  assert.equal(makeChatMsg('agent-a', 'agent-a:1', '   '), null);
+  const msg = makeChatMsg('agent-a', 'agent-a:1', ' привет ', 123)!;
+  assert.deepEqual(msg, { v: ANNO_VERSION, op: 'chat', author: 'agent-a', ts: 123, id: 'agent-a:1', text: 'привет' });
 });
 
 console.log(`\n${passed} tests passed.`);
