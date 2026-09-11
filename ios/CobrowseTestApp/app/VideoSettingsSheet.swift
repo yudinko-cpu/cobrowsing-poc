@@ -24,8 +24,13 @@ struct VideoSettingsSheet: View {
     @State private var applying = false
     @State private var errorMessage: String?
 
+    /// Последнее явное значение битрейта — чтобы при выключении «без
+    /// ограничения» слайдер вернулся туда, где был, а не на константу.
+    @State private var lastLimitedKbps: Int
+
     init(current: ScreenShareOptions) {
         _draft = State(initialValue: current)
+        _lastLimitedKbps = State(initialValue: current.maxBitrateKbps ?? 1500)
     }
 
     /// Ресолюционные пресеты — фиксированный набор из VideoDimensions.
@@ -40,9 +45,8 @@ struct VideoSettingsSheet: View {
         ("1080p (1920×1080)", .h1080_169),
     ]
 
-    /// FPS-пресеты для screen-share. Живой скролл/анимации ок с 15,
-    /// 30 нужен только для сильно-динамичного контента (игры, видео).
-    /// Ниже 5 — уже слайдшоу, не имеет смысла.
+    /// FPS-пресеты для screen-share. Дефолт для демо по Wi-Fi — 60: гладкие
+    /// скролл и анимации. 15 хватает для статичного UI, ниже 5 — уже слайдшоу.
     private let fpsOptions: [Int] = [5, 10, 15, 20, 30, 45, 60]
 
     /// Кнопка Apply актуальна, только если черновик реально отличается
@@ -87,20 +91,30 @@ struct VideoSettingsSheet: View {
                 }
 
                 Section {
-                    // Slider [50, 1000] kbps, шаг 25 — фокус на low-bitrate
-                    // экспериментах. Выше 1000 kbps для нашего 1↔1 PoC не нужно.
-                    Slider(
-                        value: bitrateBinding,
-                        in: 50...1000,
-                        step: 25
-                    )
-                    Text("\(draft.maxBitrateKbps ?? 500) kbps")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    // Дефолт для демо по Wi-Fi: без ограничения — encoder получает
+                    // высокий потолок, реальную скорость выбирает BWE
+                    // (ScreenShareOptions.unlimitedBitrateCapKbps).
+                    Toggle("Без ограничения", isOn: unlimitedBinding)
+                    if let kbps = draft.maxBitrateKbps {
+                        // Slider [50, 5000] kbps, шаг 50: низ — для low-bitrate
+                        // экспериментов (100 kbps → 240p), верх — HD/FHD.
+                        Slider(
+                            value: bitrateBinding,
+                            in: 50...5000,
+                            step: 50
+                        )
+                        Text("\(kbps) kbps")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } header: {
                     Text("Максимальный битрейт")
                 } footer: {
-                    Text("Верхняя граница. LiveKit адаптивно снижает при узкой сети. Для low-bitrate тестов подбирай разрешение под битрейт: 100 kbps → 240p.")
+                    if draft.maxBitrateKbps == nil {
+                        Text("Потолок \(ScreenShareOptions.unlimitedBitrateCapKbps / 1000) Мбит/с, фактическую скорость LiveKit выбирает по оценке канала. Для демо по Wi-Fi — лучшая картинка.")
+                    } else {
+                        Text("Верхняя граница. LiveKit адаптивно снижает при узкой сети. Для low-bitrate тестов подбирай разрешение под битрейт: 100 kbps → 240p.")
+                    }
                 }
 
                 if let err = errorMessage {
@@ -139,12 +153,27 @@ struct VideoSettingsSheet: View {
         )
     }
 
-    /// Slider работает с Double, наш kbps — Int?. Мостим через Double,
-    /// nil в UI не поддерживаем — если пользователь ушёл со слайдера,
-    /// значит хочет явное значение.
+    /// Тумблер «без ограничения» ↔ nil в maxBitrateKbps. При выключении
+    /// возвращаем последнее явное значение.
+    private var unlimitedBinding: Binding<Bool> {
+        Binding(
+            get: { draft.maxBitrateKbps == nil },
+            set: { unlimited in
+                if unlimited {
+                    if let kbps = draft.maxBitrateKbps { lastLimitedKbps = kbps }
+                    draft.maxBitrateKbps = nil
+                } else {
+                    draft.maxBitrateKbps = lastLimitedKbps
+                }
+            }
+        )
+    }
+
+    /// Slider работает с Double, наш kbps — Int?. Показывается только когда
+    /// лимит задан, поэтому nil здесь — лишь страховка.
     private var bitrateBinding: Binding<Double> {
         Binding(
-            get: { Double(draft.maxBitrateKbps ?? 500) },
+            get: { Double(draft.maxBitrateKbps ?? lastLimitedKbps) },
             set: { draft.maxBitrateKbps = Int($0) }
         )
     }

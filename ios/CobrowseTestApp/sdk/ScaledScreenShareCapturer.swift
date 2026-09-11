@@ -18,8 +18,16 @@
 //  GPU-render через CIContext (Metal). CPU-нагрузка от даунскейла < 5%
 //  на iPhone 13+ при 720p → 240p.
 //
+//  Фон. ReplayKit прекращает in-app захват, когда приложение уходит в фон, и
+//  сам его не возобновляет; LiveKit при этом приостанавливает/возобновляет
+//  только camera-треки, screen-share не трогает. Без вмешательства трек
+//  остаётся опубликованным, но кадры не идут — оператор видит замёрзший экран
+//  до ближайшего republish. Поэтому capturer сам следит за didEnterBackground /
+//  didBecomeActive и перезапускает recorder на том же треке.
+//
 
 import Foundation
+import UIKit
 import ReplayKit
 import CoreImage
 import CoreVideo
@@ -44,8 +52,8 @@ public final class ScaledScreenShareCapturer {
     private let ciContext: CIContext
 
     private var targetShortSide: Int = 720
-    private var targetFps: Int = 15
-    private var minFrameIntervalNs: Int64 = 66_666_666  // ~15 fps default
+    private var targetFps: Int = 60
+    private var minFrameIntervalNs: Int64 = 16_666_666  // ~60 fps, как дефолт ScreenShareOptions
 
     private var outputPool: CVPixelBufferPool?
     private var outputWidth: Int = 0
@@ -59,6 +67,16 @@ public final class ScaledScreenShareCapturer {
     /// (иначе dimensions не выведены, publish таймаутит на 10с).
     private var firstFrameContinuation: CheckedContinuation<Void, Never>?
     private var didEmitFirstFrame = false
+
+    /// Между успешным start() и stop(): захват должен идти. По этому флагу
+    /// решаем, восстанавливать ли его после возврата из фона.
+    private var isStarted = false
+    /// Приложение уходило в фон после старта захвата — ReplayKit его прекратил.
+    /// Именно didEnterBackground, а не willResignActive: системный алерт
+    /// (в том числе запрос ReplayKit на запись экрана) тоже снимает active,
+    /// но захват не рвёт — перезапуск там был бы лишним и опасным.
+    private var interruptedByBackground = false
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     // MARK: - Init
 
@@ -98,6 +116,65 @@ public final class ScaledScreenShareCapturer {
             attempt += 1
         }
 
+        try await startRecorder()
+
+        // Ждём первый обработанный кадр или таймаут.
+        // RPScreenRecorder выдаёт кадры не сразу — обычно 100-300ms.
+        // Таймаут — защита от зависания если что-то пошло не так с capture handler'ом.
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        if self.didEmitFirstFrame {
+                            cont.resume()
+                        } else {
+                            self.firstFrameContinuation = cont
+                        }
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)  // 5с таймаут
+                    throw CapturerError.firstFrameTimeout
+                }
+                try await group.next()
+                group.cancelAll()
+            }
+        } catch {
+            // Recorder уже запущен — не оставляем его крутиться без хозяина,
+            // иначе следующий start() упрётся в isRecording.
+            firstFrameContinuation = nil
+            if recorder.isRecording {
+                recorder.stopCapture()   // sync-перегрузка с nil completion; ждём isRecording ниже / при следующем старте
+            }
+            throw error
+        }
+
+        isStarted = true
+        interruptedByBackground = false
+        installLifecycleObservers()
+    }
+
+    public func stop() async {
+        isStarted = false
+        interruptedByBackground = false
+        removeLifecycleObservers()
+        // Разрезолвить залипший continuation, чтобы предыдущий start() не висел
+        // (или не крашил Swift 6 runtime — leaked continuation is a bug).
+        if let cont = firstFrameContinuation {
+            firstFrameContinuation = nil
+            cont.resume()
+        }
+        if recorder.isRecording {
+            recorder.stopCapture()   // sync-перегрузка с nil completion; ждём isRecording ниже / при следующем старте
+        }
+        // Пул и format description освобождаются автоматически при следующем start.
+    }
+
+    // MARK: - Recorder
+
+    /// Собственно RPScreenRecorder.startCapture с нашим хендлером. Общий для
+    /// первого старта и перезапуска после фона.
+    private func startRecorder() async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             recorder.startCapture(
                 handler: { [weak self] sampleBuffer, bufferType, error in
@@ -114,40 +191,70 @@ public final class ScaledScreenShareCapturer {
                 }
             )
         }
-
-        // Ждём первый обработанный кадр или таймаут.
-        // RPScreenRecorder выдаёт кадры не сразу — обычно 100-300ms.
-        // Таймаут — защита от зависания если что-то пошло не так с capture handler'ом.
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    if self.didEmitFirstFrame {
-                        cont.resume()
-                    } else {
-                        self.firstFrameContinuation = cont
-                    }
-                }
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: 5_000_000_000)  // 5с таймаут
-                throw CapturerError.firstFrameTimeout
-            }
-            try await group.next()
-            group.cancelAll()
-        }
     }
 
-    public func stop() async {
-        // Разрезолвить залипший continuation, чтобы предыдущий start() не висел
-        // (или не крашил Swift 6 runtime — leaked continuation is a bug).
-        if let cont = firstFrameContinuation {
-            firstFrameContinuation = nil
-            cont.resume()
+    // MARK: - Фон / возврат
+
+    private func installLifecycleObservers() {
+        guard lifecycleObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.noteBackground() }
+        })
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.resumeAfterBackground() }
+        })
+    }
+
+    private func removeLifecycleObservers() {
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
+        lifecycleObservers.removeAll()
+    }
+
+    private func noteBackground() {
+        guard isStarted else { return }
+        interruptedByBackground = true
+    }
+
+    /// Возврат из фона: ReplayKit захват уже мёртв (или встанет при первом же
+    /// кадре), перезапускаем его на том же треке. didBecomeActive, а не
+    /// willEnterForeground: startCapture требует активного приложения.
+    private func resumeAfterBackground() async {
+        guard isStarted, interruptedByBackground else { return }
+        interruptedByBackground = false
+        await restartCapture()
+    }
+
+    private func restartCapture() async {
         if recorder.isRecording {
-            try? await recorder.stopCapture()
+            recorder.stopCapture()   // sync-перегрузка с nil completion; ждём isRecording ниже / при следующем старте
         }
-        // Пул и format description освобождаются автоматически при следующем start.
+        // Как в start(): после stop recorder ещё чуть-чуть «закрывается».
+        var attempt = 0
+        while recorder.isRecording && attempt < 20 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            attempt += 1
+        }
+        // Троттлинг и размеры выхода выводим заново по первому кадру: в фоне
+        // могли повернуть устройство, а PTS после паузы не обязан продолжать ряд.
+        lastEmittedPtsNs = -1
+        outputPool = nil
+        outputFormatDescription = nil
+        do {
+            try await startRecorder()
+        } catch {
+            // Не роняем сессию: оператор увидит замёрзший кадр, как и раньше,
+            // а смена настроек видео (republish) по-прежнему всё поднимет.
+            #if DEBUG
+            print("[ScaledScreenShareCapturer] restart after background failed: \(error)")
+            #endif
+        }
     }
 
     public enum CapturerError: LocalizedError {

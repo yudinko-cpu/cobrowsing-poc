@@ -159,12 +159,14 @@ public final class LiveKitTransport: CobrowseTransport {
         case .av1:  .av1
         }
 
-        // nil битрейт = отдаём управление BWE/LiveKit (адаптивно), как и обещано
-        // в доке ScreenShareOptions.maxBitrateKbps. Прежний `?? 500` молча
-        // перебивал этот путь фиксированным полом 500 kbps и ломал адаптацию.
-        let encoding: VideoEncoding? = options.maxBitrateKbps.map { kbps in
-            VideoEncoding(maxBitrate: kbps * 1000, maxFps: options.fps)
-        }
+        // Encoding задаём ВСЕГДА явно. С nil LiveKit подбирает свой screen-share
+        // пресет по большей стороне кадра (Utils.computeVideoEncodings →
+        // computeSuggestedPreset): для портретного 720p это 2,5 Мбит/с и 15 fps —
+        // «адаптивно» на деле означало потолок 15 fps независимо от настроек.
+        // Режим «без ограничения» — высокий потолок, реальную скорость выбирает
+        // BWE (см. ScreenShareOptions.unlimitedBitrateCapKbps).
+        let kbps = options.maxBitrateKbps ?? ScreenShareOptions.unlimitedBitrateCapKbps
+        let encoding = VideoEncoding(maxBitrate: kbps * 1000, maxFps: options.fps)
 
         return VideoPublishOptions(
             name: Track.screenShareVideoName,

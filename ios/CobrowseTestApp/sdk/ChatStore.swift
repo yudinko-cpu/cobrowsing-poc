@@ -54,8 +54,22 @@ public final class ChatStore: ObservableObject {
     /// потому что SupportFAB наблюдает стор напрямую (вложенный ObservableObject
     /// не пробрасывает изменения через CobrowseClient).
     @Published public var isOpen = false {
-        didSet { if isOpen { markAllRead() } }
+        didSet {
+            if isOpen {
+                markAllRead()
+                previews.removeAll()   // сообщения видны на экране чата — превью больше не нужны
+            }
+        }
     }
+    /// Превью последних входящих у FAB, пока экран чата закрыт: не больше
+    /// `maxPreviews`, старые вытесняются. Это уведомления, а не «прочитано»:
+    /// закрытие превью не трогает unreadCount — как баннеры iOS и превью
+    /// Intercom, счётчик гасит только открытие чата. Превью обрезано до
+    /// нескольких строк, так что «увидел пузырёк» ≠ «прочитал».
+    @Published public private(set) var previews: [ChatMessage] = []
+
+    /// Сколько превью показываем одновременно у FAB.
+    public nonisolated static let maxPreviews = 3
     /// Операторы, которые сейчас печатают: identity → момент последнего
     /// heartbeat по ЛОКАЛЬНЫМ часам (мс). Локальным, а не по `ts` отправителя —
     /// рассинхрон часов телефона и браузера не должен ломать TTL.
@@ -94,8 +108,15 @@ public final class ChatStore: ObservableObject {
             let wireId = msg.id ?? String(msg.ts)
             let key = "\(msg.author)|\(wireId)"
             guard seen.insert(key).inserted else { return }
-            messages.append(ChatMessage(id: key, wireId: wireId, author: msg.author, text: text, ts: msg.ts, isMine: false))
-            if !isOpen { unreadCount += 1 }
+            let message = ChatMessage(id: key, wireId: wireId, author: msg.author, text: text, ts: msg.ts, isMine: false)
+            messages.append(message)
+            if !isOpen {
+                unreadCount += 1
+                previews.append(message)
+                if previews.count > Self.maxPreviews {
+                    previews.removeFirst(previews.count - Self.maxPreviews)
+                }
+            }
             // Сообщение пришло — «печатает» этого автора снимаем сразу.
             typing.removeValue(forKey: msg.author)
 
@@ -159,6 +180,12 @@ public final class ChatStore: ObservableObject {
         typing.removeValue(forKey: author)
     }
 
+    /// Пользователь «лопнул» превью у FAB: убираем пузырёк. Счётчик
+    /// непрочитанных не трогаем — см. комментарий к `previews`.
+    public func dismissPreview(id: String) {
+        previews.removeAll { $0.id == id }
+    }
+
     // MARK: - Жизненный цикл
 
     public func markAllRead() {
@@ -170,6 +197,7 @@ public final class ChatStore: ObservableObject {
         messages.removeAll()
         seen.removeAll()
         unreadCount = 0
+        previews.removeAll()
         typing.removeAll()
         stopTypingExpiryLoop()
     }

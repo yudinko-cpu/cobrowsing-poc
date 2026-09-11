@@ -85,17 +85,28 @@ public struct ScreenShareOptions: Sendable, Equatable {
     public var dimensions: VideoDimensions
     public var fps: Int
     public var codec: VideoCodec
-    /// Верхняя граница битрейта в kbps. nil = LiveKit сам решает (адаптивно).
-    /// Типичные значения: 500 kbps (SD/тонкая сеть), 1500 kbps (HD), 3500 kbps (FHD).
+    /// Верхняя граница битрейта в kbps. nil = без ограничения: в encoder уходит
+    /// потолок `unlimitedBitrateCapKbps`, фактическую скорость выбирает оценка
+    /// канала (BWE) — дефолт для демо по Wi-Fi, лучшая картинка. Явное значение —
+    /// для low-bitrate экспериментов: 500 kbps (SD/тонкая сеть), 1500 (HD), 3500 (FHD).
     public var maxBitrateKbps: Int?
+
+    /// Потолок encoder'а в режиме «без ограничения». Транспорту нельзя отдавать
+    /// LiveKit nil: без явного encoding SDK берёт свой screen-share пресет по
+    /// размеру кадра — для нашего портретного 720p это 2,5 Мбит/с и 15 fps, то
+    /// есть режет и качество, и fps. 20 Мбит/с — заведомо выше того, что H.264
+    /// hardware encoder тратит на 720p60 UI-контента (обычно 3–8 Мбит/с);
+    /// реальную скорость всё равно ограничит BWE.
+    public static let unlimitedBitrateCapKbps = 20_000
     /// false = ReplayKit RPScreenRecorder (только это приложение, P0)
     /// true  = Broadcast Extension (весь экран устройства, P2)
     public var useBroadcastExtension: Bool
 
+    /// Дефолты — под демо по Wi-Fi: 720p, 60 fps, без ограничения битрейта.
     public init(dimensions: VideoDimensions = .h720_169,
-                fps: Int = 15,
+                fps: Int = 60,
                 codec: VideoCodec = .h264,
-                maxBitrateKbps: Int? = 500,
+                maxBitrateKbps: Int? = nil,
                 useBroadcastExtension: Bool = false) {
         self.dimensions = dimensions
         self.fps = fps

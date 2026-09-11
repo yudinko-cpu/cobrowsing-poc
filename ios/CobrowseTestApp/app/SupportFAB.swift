@@ -5,6 +5,9 @@
 //  Плавающая кнопка чата поддержки. Полупрозрачный круг, который клиент может
 //  перетащить в любое место экрана, чтобы он не мешал интерфейсу; после
 //  отпускания прилипает к ближайшему боковому краю. Тап открывает чат.
+//  Поверх кружка — бейдж непрочитанных и капсула «оператор печатает». Рядом —
+//  стопка превью последних сообщений (PreviewStack): читать ответы оператора
+//  можно, не открывая чат; тап по пузырьку «лопает» его.
 //
 //  Живёт в SwiftUI-иерархии ContentView (overlay поверх всех табов), а не в
 //  overlay-окне аннотаций — то окно pass-through (hitTest → nil) и не может
@@ -37,6 +40,12 @@ struct SupportFAB: View {
     private let topClearance: CGFloat = 52
     /// Таб-бар снизу (на iOS 26 плавающий) — с запасом.
     private let bottomClearance: CGFloat = 80
+    /// Зазор между кнопкой и стопкой превью. Под кнопкой больше — там
+    /// выскакивает капсула «печатает».
+    private let previewGapAbove: CGFloat = 8
+    private let previewGapBelow: CGFloat = 18
+    /// Потолок ширины пузырька: не заграждать экран, но вмещать фразу.
+    private let previewMaxWidth: CGFloat = 260
 
     var body: some View {
         // GeometryReader сам не хит-тестится: касания вне кружка проходят в TabView.
@@ -47,6 +56,32 @@ struct SupportFAB: View {
                 // экран после поворота / смены размеров.
                 let base = clamp(position ?? CGPoint(x: bounds.maxX, y: bounds.maxY), to: bounds)
                 let shown = clamp(CGPoint(x: base.x + drag.width, y: base.y + drag.height), to: bounds)
+                let onLeft = shown.x < bounds.midX
+                let below = shown.y < bounds.midY
+
+                // Превью сообщений — стопкой рядом с кнопкой, в сторону центра
+                // экрана: над кнопкой (под ней, если кнопка в верхней половине),
+                // прижаты к её краю. Якорь — невидимый квадрат размером с кнопку
+                // в той же точке: alignmentGuide выносит стопку за его границу,
+                // а .position двигает её вместе с кнопкой, в том числе во время drag.
+                if !chat.previews.isEmpty {
+                    Color.clear
+                        .frame(width: size, height: size)
+                        .overlay(alignment: previewAlignment(onLeft: onLeft, below: below)) {
+                            PreviewStack(
+                                previews: chat.previews,
+                                onLeft: onLeft,
+                                below: below,
+                                width: min(previewMaxWidth, geo.size.width - size - margin * 2),
+                                onPop: { chat.dismissPreview(id: $0.id) }
+                            )
+                            .alignmentGuide(below ? .bottom : .top) { d in
+                                below ? d[.top] - previewGapBelow : d[.bottom] + previewGapAbove
+                            }
+                        }
+                        .position(shown)
+                        .transition(.opacity)
+                }
 
                 fab
                     // Один жест на тап и drag: тап и DragGesture на одном view
@@ -170,5 +205,89 @@ struct SupportFAB: View {
     /// Прилипание к ближайшему боковому краю; вертикаль сохраняется.
     private func snapToEdge(_ p: CGPoint, in r: CGRect) -> CGPoint {
         CGPoint(x: p.x < r.midX ? r.minX : r.maxX, y: p.y)
+    }
+
+    /// Угол якоря, к которому прижата стопка превью: край кнопки, обращённый
+    /// к центру экрана, и та сторона, где больше места.
+    private func previewAlignment(onLeft: Bool, below: Bool) -> Alignment {
+        switch (onLeft, below) {
+        case (true, false):  return .topLeading
+        case (false, false): return .topTrailing
+        case (true, true):   return .bottomLeading
+        case (false, true):  return .bottomTrailing
+        }
+    }
+}
+
+// MARK: - Стопка превью
+
+/// До `ChatStore.maxPreviews` пузырьков с текстом последних входящих. Новые —
+/// ближе к кнопке: над кнопкой стопка растёт вверх (старые сверху), под
+/// кнопкой — вниз.
+private struct PreviewStack: View {
+    let previews: [ChatMessage]
+    let onLeft: Bool
+    let below: Bool
+    let width: CGFloat
+    let onPop: (ChatMessage) -> Void
+
+    var body: some View {
+        let ordered = below ? Array(previews.reversed()) : previews
+        VStack(alignment: onLeft ? .leading : .trailing, spacing: 6) {
+            ForEach(ordered) { message in
+                PreviewBubble(message: message) { onPop(message) }
+                    // Появление — «вырастает» из угла у кнопки; исчезновение —
+                    // схлопывается туда же: пузырёк лопнул.
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.85, anchor: anchor).combined(with: .opacity),
+                        removal: .scale(scale: 0.3, anchor: anchor).combined(with: .opacity)
+                    ))
+            }
+        }
+        // Фиксированная ширина стопки задаёт предел переноса текста; сами
+        // пузырьки обнимают свой текст и прижаты к стороне кнопки. Пустая
+        // часть кадра не хит-тестится — экран под ней остаётся кликабельным.
+        .frame(width: width, alignment: onLeft ? .leading : .trailing)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: previews)
+        // Лёгкая тактильная отдача только когда пузырёк лопнули (число уменьшилось).
+        .sensoryFeedback(.impact(weight: .light), trigger: previews.count) { old, new in new < old }
+    }
+
+    private var anchor: UnitPoint {
+        switch (onLeft, below) {
+        case (true, false):  return .bottomLeading
+        case (false, false): return .bottomTrailing
+        case (true, true):   return .topLeading
+        case (false, true):  return .topTrailing
+        }
+    }
+}
+
+/// Один пузырёк: подпись оператора и текст не длиннее трёх строк.
+private struct PreviewBubble: View {
+    let message: ChatMessage
+    let onTap: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(message.author)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(message.text)
+                .font(.subheadline)
+                .lineLimit(3)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.4), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .onTapGesture(perform: onTap)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Оператор \(message.author): \(message.text)")
+        .accessibilityHint("Нажмите, чтобы скрыть")
+        .accessibilityAddTraits(.isButton)
     }
 }
