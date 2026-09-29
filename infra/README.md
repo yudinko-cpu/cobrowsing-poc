@@ -12,8 +12,8 @@ TLS и маршрутизацию по доменам делает не этот
   подставляет из `infra/.env`, кладёт результат в `/opt/edge/sites/cobrowsing.caddy`
   и делает `docker exec edge-caddy caddy reload`.
 - Если конфиг не принят, edge продолжает работать со старым, а деплой падает с ошибкой.
-- Установка edge и переезд с прежнего Caddy этого стека описаны в `deploy/edge/README.md`
-  репозитория флэш-карточек (`devkyudin/vibe-flash-cards`).
+- Edge, пользователи деплоя, ufw, каталоги `/opt/*` и `.env` (в SOPS) описаны Ansible-плейбуками
+  в приватном репозитории `devkyudin/vps-infra`. Там же runbook пересоздания и переезда VPS.
 
 ## Требования
 

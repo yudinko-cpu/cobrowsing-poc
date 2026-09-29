@@ -126,6 +126,18 @@ jobs:
             # GHCR-аккаунтами, общий ~/.docker/config.json они бы перетирали.
             export DOCKER_CONFIG=/opt/cobrowsing/.docker
 
+            # 0) Предусловия до любых изменений на сервере: общий edge-Caddy запущен
+            #    и каталог его сайтов доступен нам на запись. Иначе деплой упадёт уже
+            #    после перезапуска контейнеров, а сайт не будет зарегистрирован в edge.
+            if [ ! -w /opt/edge/sites ]; then
+              echo "Нет прав на запись в /opt/edge/sites для $(whoami). На VPS: sudo chown -R $(whoami): /opt/edge/sites"
+              exit 1
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' edge-caddy 2>/dev/null)" != true ]; then
+              echo "Контейнер edge-caddy не запущен. См. README репозитория devkyudin/vps-infra"
+              exit 1
+            fi
+
             # 1) Обновляем compose/config-файлы из репозитория (сами образы уже в GHCR).
             git fetch --quiet origin main
             git reset --hard origin/main
