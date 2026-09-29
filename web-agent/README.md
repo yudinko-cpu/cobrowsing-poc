@@ -26,6 +26,6 @@ npm run dev   # http://localhost:3000
 
 ## Деплой (для POC)
 
-Простой вариант: `next build && next export → /srv/web-agent`, Caddy раздаёт статику. См. `infra/Caddyfile`.
+Простой вариант: `next build && next export → /srv/web-agent`, Caddy раздаёт статику. Сайты Caddy описаны в `infra/edge-site.caddy`.
 
 Для prod — Vercel, Netlify, или Docker-контейнер с `next start`.

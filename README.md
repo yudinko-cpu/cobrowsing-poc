@@ -14,11 +14,11 @@ cobrowsing-poc/
 │   ├── HANDOFF.md                  # Брифинг для новой сессии разработки
 │   └── p0-acceptance-criteria.md   # Тикеты для P0
 ├── infra/                          # Self-hosted LiveKit deployment
-│   ├── docker-compose.yml          # Prod: Caddy + Let's Encrypt + реальные домены
+│   ├── docker-compose.yml          # Prod: LiveKit + backend + web-agent (TLS — общий edge-Caddy)
 │   ├── docker-compose.dev.yml      # Dev: без TLS, всё на 127.0.0.1
 │   ├── livekit.yaml                # Prod-конфиг LiveKit
 │   ├── livekit.dev.yaml            # Dev-конфиг LiveKit
-│   ├── Caddyfile
+│   ├── edge-site.caddy             # Наши сайты для общего edge-Caddy VPS
 │   ├── README.md                   # Как развернуть на VPS
 │   └── README.dev.md               # Как поднять локально
 ├── backend/                        # Token & session API

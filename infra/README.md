@@ -2,6 +2,19 @@
 
 Инструкция для разворачивания на одном VPS (Hetzner, DigitalOcean, AWS EC2 t3.medium).
 
+## Ingress: общий edge-Caddy
+
+TLS и маршрутизацию по доменам делает не этот стек, а общий для VPS edge-Caddy
+(`/opt/edge`, host network, 80/443). Он же обслуживает другие проекты на сервере
+(например, флэш-карточки на `cards.mvirtual.cc`).
+
+- Наши сайты описаны в `infra/edge-site.caddy`. Плейсхолдеры доменов в нём deploy-workflow
+  подставляет из `infra/.env`, кладёт результат в `/opt/edge/sites/cobrowsing.caddy`
+  и делает `docker exec edge-caddy caddy reload`.
+- Если конфиг не принят, edge продолжает работать со старым, а деплой падает с ошибкой.
+- Установка edge и переезд с прежнего Caddy этого стека описаны в `deploy/edge/README.md`
+  репозитория флэш-карточек (`devkyudin/vibe-flash-cards`).
+
 ## Требования
 
 - Linux-сервер с публичным IPv4 (Ubuntu 22.04+)
@@ -56,10 +69,16 @@ sed -i "s/APIxxxxxxxxxxxx:.*/$LIVEKIT_API_KEY: $LIVEKIT_API_SECRET/" livekit.yam
 
 ### 5. Запустить
 
+Edge-Caddy (`/opt/edge`) должен быть уже установлен, см. раздел «Ingress» выше.
+
 ```bash
 docker compose up -d
 docker compose logs -f livekit  # убедиться, что сервер стартовал без ошибок
 ```
+
+Сайты в edge регистрирует deploy-workflow. При ручном первом старте без workflow нужно
+отрендерить `edge-site.caddy` в `/opt/edge/sites/cobrowsing.caddy` (команды —
+в шаге 3 runbook edge) и выполнить `docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile`.
 
 ### 6. Проверка
 
@@ -81,7 +100,7 @@ docker run --rm livekit/livekit-cli load-test \
 ## Что мониторить в проде
 
 - LiveKit Prometheus metrics: `:6789/metrics` (включить в `livekit.yaml`)
-- Caddy access logs: `docker compose exec caddy cat /data/livekit-access.log`
+- Caddy access logs: `docker exec edge-caddy cat /data/cobrowsing-livekit-access.log` (также `cobrowsing-api-*`, `cobrowsing-agent-*`)
 - Redis memory usage: `redis-cli INFO memory`
 - Port allocation: `ss -tunap | grep -c ESTAB`
 
@@ -91,7 +110,7 @@ docker run --rm livekit/livekit-cli load-test \
 
 **WebRTC падает на TCP fallback (тормоза):** проверить `use_external_ip: true` и что `--node-ip` передан правильно.
 
-**TLS-ошибки:** Caddy логи в `docker compose logs caddy`. Чаще всего — DNS ещё не пропагировался или порт 80 заблокирован (ACME challenge не проходит).
+**TLS-ошибки:** Caddy логи в `docker logs edge-caddy`. Чаще всего — DNS ещё не пропагировался или порт 80 заблокирован (ACME challenge не проходит).
 
 **OOM redis:** уменьшить retention для session-кодов до 5 минут в `backend/server.js`.
 
@@ -115,7 +134,8 @@ docker run --rm livekit/livekit-cli load-test \
    sudo ufw allow 3478/udp    # TURN STUN
    sudo ufw allow 5349/tcp    # TURN TLS
    ```
-3. Смонтировать Let's Encrypt cert от Caddy в volume LiveKit
-   (добавить `- caddy-data:/certs:ro` в `docker-compose.yml` для сервиса livekit,
-   указать путь к fullchain.pem/privkey.pem в `livekit.yaml`)
+3. Смонтировать Let's Encrypt cert от edge-Caddy в LiveKit: сертификаты лежат в томе
+   `edge_caddy-data`. Объявить его в `docker-compose.yml` как `external: true`, добавить
+   `- edge_caddy-data:/certs:ro` сервису livekit и указать путь к fullchain.pem/privkey.pem
+   в `livekit.yaml`.
 4. Перезапустить: `docker compose up -d livekit`

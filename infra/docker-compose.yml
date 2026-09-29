@@ -1,4 +1,4 @@
-# Prod-стек: self-hosted LiveKit + token-server + web-agent + Caddy.
+# Prod-стек: self-hosted LiveKit + token-server + web-agent.
 #
 # Образы backend и web-agent тянутся из GHCR (пушит GHA-workflow из .github/).
 # Тег контролируется через IMAGE_TAG в infra/.env — GHA переписывает его на
@@ -13,14 +13,18 @@
 #
 # СЕТЬ:
 #   - LiveKit — network_mode: host (обязательно для UDP media).
-#   - Caddy — bridge, публикует 80/443 на хост, ходит к bridge-сервисам по
-#     service name (backend, web-agent), к LiveKit — через host.docker.internal.
+#   - TLS и маршрутизацию делает общий edge-Caddy VPS (/opt/edge, host mode,
+#     80/443) — он общий для всех проектов на сервере и в этот стек не входит.
+#     Его конфиг для наших доменов — infra/edge-site.caddy, deploy-workflow
+#     кладёт его в /opt/edge/sites/cobrowsing.caddy и делает reload.
+#     Edge ходит к LiveKit на localhost:7880, к backend/web-agent — на
+#     127.0.0.1:4000 / 127.0.0.1:3000.
 #   - Остальные — дефолтная bridge-сеть compose, общаются по service name.
 #
 # ПОРТЫ, СМОТРЯЩИЕ ВОВНЕ:
-#   - Caddy: 80/tcp, 443/tcp
+#   - edge-Caddy (вне этого стека): 80/tcp, 443/tcp
 #   - LiveKit: 7881/tcp (TCP fallback), 50000-60000/udp (media)
-#   Backend и Redis наружу НЕ выставлены (bridge network, доступ только через Caddy).
+#   Backend и Redis наружу НЕ выставлены (доступ только через edge-Caddy).
 
 services:
   # LiveKit SFU — WebRTC media. Host mode обязателен.
@@ -66,7 +70,7 @@ services:
       PORT: 4000
       LIVEKIT_URL: wss://${DOMAIN}
       # backend ходит к LiveKit по HTTP (host mode), не через WSS-фронт Caddy —
-      # экономим TLS-handshake и не зависим от того, поднялся ли уже Caddy.
+      # экономим TLS-handshake и не зависим от того, поднялся ли edge-Caddy.
       LIVEKIT_INTERNAL_URL: http://host.docker.internal:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
@@ -92,7 +96,7 @@ services:
     image: ghcr.io/${GHCR_OWNER}/cobrowsing-poc-web-agent:${IMAGE_TAG:-latest}
     restart: unless-stopped
     ports:
-      # Локальный bind — нужен для Caddy (host mode) чтобы дотянуться
+      # Локальный bind — нужен edge-Caddy (host mode), чтобы дотянуться
       # через 127.0.0.1:3000. Наружу не публикуется.
       - "127.0.0.1:3000:3000"
     environment:
@@ -100,28 +104,5 @@ services:
     depends_on:
       - backend
 
-  # Caddy — TLS termination + reverse proxy.
-  # Host mode: все апстримы (LiveKit host-mode + backend/web-agent на
-  # 127.0.0.1) доступны через localhost. Обходит проблему cross-bridge
-  # FORWARD-DROP на Ubuntu с включённым ufw.
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    environment:
-      DOMAIN: ${DOMAIN}
-      API_DOMAIN: ${API_DOMAIN}
-      AGENT_DOMAIN: ${AGENT_DOMAIN}
-    depends_on:
-      - backend
-      - web-agent
-      - livekit
-
 volumes:
   redis-data:
-  caddy-data:
-  caddy-config:

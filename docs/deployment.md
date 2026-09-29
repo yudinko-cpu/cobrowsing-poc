@@ -11,7 +11,7 @@
 - **GHA workflow** (`.github/workflows/deploy.yml`) — билд + пуш в GHCR + SSH-деплой
 - **VPS** — Hetzner CX22 (Ubuntu 22.04, публичный IPv4)
 - **GHCR** — приватные образы `ghcr.io/<owner>/cobrowsing-poc-{backend,web-agent}`
-- **Compose стек** — `infra/docker-compose.yml` (LiveKit + backend + web-agent + Redis + Caddy)
+- **Compose стек** — `infra/docker-compose.yml` (LiveKit + backend + web-agent + Redis). TLS и домены — общий edge-Caddy VPS (`/opt/edge`), см. `infra/README.md`, раздел «Ingress»
 
 ## Часть 1. VPS bootstrap (делается один раз)
 
@@ -168,7 +168,8 @@ echo "<PAT>" | docker login ghcr.io -u <github-username> --password-stdin
 cd /opt/cobrowsing/infra
 docker compose --env-file .env build backend
 # web-agent требует NEXT_PUBLIC_API_URL как build-arg — проще запустить GHA
-docker compose --env-file .env up -d livekit redis backend caddy
+docker compose --env-file .env up -d livekit redis backend
+# сайты в edge-Caddy: см. infra/README.md, шаг 5
 ```
 
 ### 1.12 Проверка (все контейнеры Up)
@@ -177,11 +178,11 @@ docker compose --env-file .env up -d livekit redis backend caddy
 cd /opt/cobrowsing/infra
 docker compose ps                           # все должны быть running/healthy
 curl -fsS http://127.0.0.1:4000/health      # backend внутри
-curl -fsS https://api.cobrowse.example.com/health   # backend через Caddy + TLS
+curl -fsS https://api.cobrowse.example.com/health   # backend через edge-Caddy + TLS
 curl -I  https://livekit.example.com/       # 200 + X-LiveKit-Version
 ```
 
-Если TLS-цикл ретраится — DNS ещё не пропагирован, `docker compose logs caddy`.
+Если TLS-цикл ретраится — DNS ещё не пропагирован, `docker logs edge-caddy`.
 
 ## Часть 2. Настройка GitHub (GHA секреты и переменные)
 

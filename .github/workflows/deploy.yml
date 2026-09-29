@@ -7,7 +7,8 @@
 #   1) build-and-push — билдит два образа (backend + web-agent), пушит в GHCR
 #      с двумя тегами: git SHA (для rollback) и latest.
 #   2) deploy — SSH на VPS, git pull compose-файлов, docker compose pull + up -d,
-#      smoke-check /health.
+#      smoke-check /health, затем обновление наших сайтов в общем edge-Caddy
+#      (/opt/edge — один Caddy на 80/443 для всех проектов VPS).
 #
 # Секреты (GitHub → Settings → Secrets and variables → Actions):
 #   VPS_SSH_HOST          — IP или домен VPS (e.g. api.cobrowse.example.com)
@@ -121,6 +122,9 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/cobrowsing
+            # Свой docker config: на VPS деплоятся и другие проекты со своими
+            # GHCR-аккаунтами, общий ~/.docker/config.json они бы перетирали.
+            export DOCKER_CONFIG=/opt/cobrowsing/.docker
 
             # 1) Обновляем compose/config-файлы из репозитория (сами образы уже в GHCR).
             git fetch --quiet origin main
@@ -159,13 +163,37 @@ jobs:
             docker compose --env-file .env restart livekit
 
             # 6) Smoke-check: token-server /health должен ответить 200 в течение 60с.
+            healthy=false
             for i in $(seq 1 30); do
               if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
-                echo "backend healthy"
-                exit 0
+                healthy=true
+                break
               fi
               sleep 2
             done
-            echo "backend /health не отвечает — откатываемся"
-            docker compose --env-file .env logs --tail=100 backend
-            exit 1
+            if [ "$healthy" != true ]; then
+              echo "backend /health не отвечает"
+              docker compose --env-file .env logs --tail=100 backend
+              exit 1
+            fi
+            echo "backend healthy"
+
+            # 7) Наши сайты в общем edge-Caddy: рендерим infra/edge-site.caddy с
+            #    доменами из .env и делаем reload. Если Caddy не принял конфиг, он
+            #    продолжает работать со старым, а мы возвращаем прежний файл —
+            #    сайты других проектов на VPS это не затрагивает.
+            SITE=/opt/edge/sites/cobrowsing.caddy
+            sed \
+              -e "s|\${DOMAIN}|${DOMAIN}|g" \
+              -e "s|\${API_DOMAIN}|${API_DOMAIN}|g" \
+              -e "s|\${AGENT_DOMAIN}|${AGENT_DOMAIN}|g" \
+              edge-site.caddy > "$SITE.new"
+            if [ -f "$SITE" ]; then cp "$SITE" "$SITE.bak"; fi
+            mv "$SITE.new" "$SITE"
+            if ! docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+              echo "edge-caddy не принял конфиг — возвращаем прежний"
+              if [ -f "$SITE.bak" ]; then mv "$SITE.bak" "$SITE"; else rm -f "$SITE"; fi
+              exit 1
+            fi
+            rm -f "$SITE.bak"
+            echo "edge-caddy reloaded"

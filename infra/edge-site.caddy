@@ -1,0 +1,45 @@
+# Сайты cobrowsing для общего edge-Caddy VPS (/opt/edge, один Caddy на 80/443
+# для всех проектов на сервере).
+#
+# Плейсхолдеры доменов (DOMAIN, API_DOMAIN, AGENT_DOMAIN в синтаксисе ${...})
+# подставляет deploy-workflow из infra/.env и кладёт результат в
+# /opt/edge/sites/cobrowsing.caddy, затем делает `caddy reload`.
+#
+# Caddy сам получает сертификаты Let's Encrypt для всех трёх доменов. DNS
+# A-записи должны быть настроены до первого старта, иначе ACME challenge не пройдёт.
+#
+# Edge-Caddy работает в host mode, поэтому апстримы адресуются через localhost:
+#   - LiveKit (host mode) — localhost:7880
+#   - backend (bridge, published) — 127.0.0.1:4000
+#   - web-agent (bridge, published) — 127.0.0.1:3000
+# Логи пишутся в общий /data edge-Caddy, поэтому у файлов префикс проекта.
+
+# LiveKit WebSocket signaling.
+${DOMAIN} {
+    reverse_proxy localhost:7880
+
+    log {
+        output file /data/cobrowsing-livekit-access.log
+        format json
+    }
+}
+
+# Token API.
+${API_DOMAIN} {
+    reverse_proxy localhost:4000
+
+    log {
+        output file /data/cobrowsing-api-access.log
+        format json
+    }
+}
+
+# Web-agent (Next.js SSR — reverse_proxy, не file_server).
+${AGENT_DOMAIN} {
+    reverse_proxy localhost:3000
+
+    log {
+        output file /data/cobrowsing-agent-access.log
+        format json
+    }
+}
